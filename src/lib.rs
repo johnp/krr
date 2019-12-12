@@ -367,7 +367,20 @@ impl QualitativeCalculus {
             None =>
             // TODO: persist converse if not cheap?
             {
-                (u32::from(self.universe_relation) ^ u32::from(relation)).into()
+                // TODO: other converse fast paths possible?
+                if relation == self.empty_relation {
+                    self.universe_relation
+                } else if relation == self.universe_relation {
+                    self.empty_relation
+                } else {
+                    let mut res = Vec::new();
+                    for rel in self.relation_to_base_relations(relation) {
+                        res.push(self.converses.get(&rel).unwrap()); //  TODO: unreachable!()
+                    }
+                    res.into_iter()
+                        .fold(0, |acc, &rel| acc | u32::from(rel))
+                        .into()
+                }
             }
         }
     }
