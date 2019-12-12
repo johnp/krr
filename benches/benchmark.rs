@@ -32,12 +32,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let easy_solvers = black_box(setup_easy_solvers(&linear_calculus));
 
         for (i, mut solver) in easy_solvers.into_iter().enumerate() {
-            c.bench_function(&format!("easy {}", i), |b| {
-                b.iter(|| {
-
-                    solver.a_closure_v2()
-                })
-            });
+            c.bench_function(&format!("easy {}", i), |b| b.iter(|| solver.a_closure_v2()));
         }
     }
 

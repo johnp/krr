@@ -9,7 +9,7 @@ use std::{fmt, iter};
 use itertools::Itertools;
 use unicode_segmentation::UnicodeSegmentation;
 
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 // TODO: move to naïve arbitrary-sized bit sets using some bitvec/bitfield/bitset crate or rustc's HybridBitSet
 // TODO: move to advanced arbitrary-sized bit sets, e.g. idlset/hibitset/vod
@@ -299,12 +299,12 @@ impl QualitativeCalculus {
     }
 
     // just prototyping laziness in return type
+    #[allow(dead_code)]
     fn relation_to_base_relation_iter(
         &self,
         relation: Relation,
     ) -> Box<dyn Iterator<Item = Relation>> {
-        if relation == self.empty_relation || relation == self.universe_relation
-        {
+        if relation == self.empty_relation || relation == self.universe_relation {
             Box::new(iter::once(relation))
         } else {
             let mut remaining_relations: u32 = relation.into();
@@ -325,6 +325,7 @@ impl QualitativeCalculus {
     }
 
     // just prototyping laziness in return type
+    #[allow(dead_code)]
     fn relation_to_base_relation_iter2(
         &self,
         relation: Relation,
@@ -466,7 +467,7 @@ pub struct Solver<'a> {
     largest_number: u32,
     // TODO: Node(u32)
     relation_instances: HashMap<(u32, u32), Relation>,
-    pub comment: String
+    pub comment: String,
 }
 
 impl<'a> fmt::Display for Solver<'a> {
@@ -534,9 +535,7 @@ impl<'a> Solver<'a> {
                 })
                 .fold(0, u32::bitor)
                 .into();
-            if let Some(previous_instance) = relation_instances.insert(
-                (first, second), relation,
-            ) {
+            if let Some(previous_instance) = relation_instances.insert((first, second), relation) {
                 assert_eq!(
                     previous_instance, relation,
                     "Previous instance ({},{}):{:?} conflicts with new instance {:?}",
@@ -564,16 +563,23 @@ impl<'a> Solver<'a> {
             panic!("No relation instances found!");
         }
 
-        let &max_node = relation_instances.keys().map(|(a,b)| a.max(b)).max().unwrap();
+        let &max_node = relation_instances
+            .keys()
+            .map(|(a, b)| a.max(b))
+            .max()
+            .unwrap();
         if max_node > largest_number {
-            panic!("Largest number wrong! (Is {}, but comment says {})", max_node, largest_number);
+            panic!(
+                "Largest number wrong! (Is {}, but comment says {})",
+                max_node, largest_number
+            );
         }
 
         Solver {
             calculus,
             largest_number,
             relation_instances,
-            comment
+            comment,
         }
     }
 
@@ -604,8 +610,12 @@ impl<'a> Solver<'a> {
     }
 
     fn trivially_inconsistent(&self) -> Result<(), String> {
-        if self.relation_instances.values().any(|&rel| rel == self.calculus.empty_relation) {
-           Err("Trivially inconsistent.".to_owned())
+        if self
+            .relation_instances
+            .values()
+            .any(|&rel| rel == self.calculus.empty_relation)
+        {
+            Err("Trivially inconsistent.".to_owned())
         } else {
             Ok(())
         }
@@ -621,7 +631,7 @@ impl<'a> Solver<'a> {
                 0..=self.largest_number,
                 0..=self.largest_number
             ) {
-                if k == i || k == j {
+                if i == j || k == i || k == j {
                     continue;
                 }
 
@@ -640,14 +650,16 @@ impl<'a> Solver<'a> {
         // TODO: better deque? Priority? Implement priority (+version)!
         // TODO: skip all i <= j
         // TODO: skip edges that only have adjacent universal relations
-        // TODO: skip if i == j == UNIVERSE (worth it?)
+        // TODO: skip if i == j == UNIVERSE (worth it? or is the compose-fast-path good enough?)
         let mut queue: VecDeque<(u32, u32)> =
             iproduct!(0..=self.largest_number, 0..=self.largest_number).collect();
-        println!("Initial queue size: {}", queue.len());
+        if DEBUG {
+            println!("Initial queue size: {}", queue.len());
+        }
         while !queue.is_empty() {
             let (i, j) = queue.pop_front().unwrap(); // TODO: i==j?
             for k in 0..=self.largest_number {
-                if k == i || k == j {
+                if i == j || k == i || k == j {
                     continue;
                 }
                 let c_ik = self.lookup(i, k);
@@ -663,11 +675,14 @@ impl<'a> Solver<'a> {
                 self.refine(k, i, j, c_kj, c_ki, c_ij, Some(&mut queue))?;
             }
         }
-        println!("End queue size: {}", queue.len());
+        if DEBUG {
+            println!("End queue size: {}", queue.len());
+        }
         Ok(())
     }
 
     //noinspection GrazieInspection
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn refine(
         &mut self,
@@ -695,8 +710,8 @@ impl<'a> Solver<'a> {
                 None
             };
             if refined_ik == self.calculus.empty_relation || DEBUG {
-                let msg =
-                    format!("\
+                let msg = format!(
+                    "\
 Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
     c_ik = {7:010$b}
     c_ij = {8:010$b}
@@ -704,14 +719,20 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
     {13}
     comp = {12:010$b}
     c_ik = {11:010$b}",
-                        i, j, k,
-                        self.calculus.relation_to_symbol(c_ik.into()),
-                        self.calculus.relation_to_symbol(c_ij.into()),
-                        self.calculus.relation_to_symbol(c_jk.into()),
-                        self.calculus.relation_to_symbol(refined_ik.into()),
-                        u32::from(c_ik), u32::from(c_ij), u32::from(c_jk),
-                        self.calculus.max_encoding_len(), u32::from(refined_ik), u32::from(composed),
-                        "‒".repeat(self.calculus.max_encoding_len() + 7)
+                    i,
+                    j,
+                    k,
+                    self.calculus.relation_to_symbol(c_ik.into()),
+                    self.calculus.relation_to_symbol(c_ij.into()),
+                    self.calculus.relation_to_symbol(c_jk.into()),
+                    self.calculus.relation_to_symbol(refined_ik.into()),
+                    u32::from(c_ik),
+                    u32::from(c_ij),
+                    u32::from(c_jk),
+                    self.calculus.max_encoding_len(),
+                    u32::from(refined_ik),
+                    u32::from(composed),
+                    "‒".repeat(self.calculus.max_encoding_len() + 7)
                 );
                 if refined_ik == self.calculus.empty_relation {
                     return Err(msg);
@@ -726,7 +747,7 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
         Ok(())
     }
 
-    // TODO: Universal A-Closure
+    // TODO: Universal A-Closure with priorities
     //fn universal_a_closure(&mut self) -> Result<(), String> {
     //    unimplemented!()
     //}
@@ -735,8 +756,6 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
 // TODO: refinement search
 // TODO: bookkeeping of network changes to "undo" dynamically (less memory / no copies)
 // TODO: implement custom inline refinement a-closure
-
-
 
 #[inline]
 fn intersect(rel1: u32, rel2: u32) -> u32 {
@@ -750,6 +769,7 @@ fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
 
 // TODO: MOAR TESTS!
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use std::fs;
 
