@@ -27,7 +27,6 @@ fn setup_hard_solver1(calculus: &QualitativeCalculus) -> Solver {
 
 // TODO: Compare different A-Closure impls
 pub fn criterion_benchmark(c: &mut Criterion) {
-    /*
     let linear_calculus = black_box(setup_calculus());
     {
         let easy_solvers = black_box(setup_easy_solvers(&linear_calculus));
@@ -41,7 +40,6 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             });
         }
     }
-    */
 
     let allen_calculus = black_box(setup_allen_calculus());
     c.bench_function("hard 1", |b| {

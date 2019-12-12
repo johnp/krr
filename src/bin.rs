@@ -10,6 +10,24 @@ use clap::{App, Arg};
 use krr::QualitativeCalculus;
 use krr::Solver;
 use std::io::Write;
+use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter, Error};
+
+#[derive(Debug)]
+enum ErrorType {
+    FalsePositive,
+    FalseNegative
+}
+
+impl Display for ErrorType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            Self::FalsePositive => write!(f, "False Positive")?,
+            Self::FalseNegative => write!(f, "False Negative")?,
+        }
+        Ok(())
+    }
+}
 
 fn main() {
     let matches = App::new("krr")
@@ -54,14 +72,14 @@ fn main() {
         .expect("Failed to read PC_INPUT file");
 
     let calculus = QualitativeCalculus::new(&calc_input);
-    println!("Calculus:\n{}", calculus);
+    //println!("Calculus:\n{}", calculus);
 
     let idx;
     let mut counter = 0;
-    let (mut false_pos, mut false_neg) = (0usize, 0usize);
+    let mut errors = BTreeMap::new();
     let split = pc_input.split(".\n");
     let iter: Box<dyn Iterator<Item = &str>> = if let Some(idx_str) = matches.value_of("PC_INDEX") {
-        idx = idx_str.parse::<usize>().unwrap() + 1;
+        idx = idx_str.parse::<usize>().unwrap();
         Box::new(iter::once(split.take(idx).last().unwrap_or_else(|| {
             panic!("Could not find QCSP at index '{}'", idx)
         })))
@@ -69,7 +87,7 @@ fn main() {
         idx = 1;
         Box::new(split)
     };
-    for (pc, idx) in iter.zip(idx..) {
+    for (pc, i) in iter.zip(idx..) {
         if pc.is_empty() {
             break;
         }
@@ -81,38 +99,40 @@ fn main() {
             .nth(0)
             .unwrap_or(None);
         let mut solver = Solver::new(&calculus, pc);
-        println!("Solver({}): {}", idx, solver);
+        println!("Comment: {}", solver.comment);
+        println!("Solver:\n{}", solver);
         match solver.a_closure_v1() {
             Ok(()) => {
-                println!("Reduced: {:#}", solver);
+                println!("Result: Consistent");
+                //println!("Reduced: {:#}", solver);
                 if consistent == Some(false) {
                     let _ = io::stdout().flush();
                     eprintln!("ERROR: INPUT ASSERTS INCONSISTENCY!");
                     let _ = io::stderr().flush();
-                    false_pos += 1;
+                    errors.insert(i, ErrorType::FalsePositive);
                 }
             }
             Err(msg) => {
-                println!("Not three-consistent:\n{}", msg);
+                println!("Result: Not three-consistent, because:\n{}", msg);
                 if consistent == Some(true) {
                     let _ = io::stdout().flush();
                     eprintln!("ERROR: INPUT ASSERTS CONSISTENCY!");
                     let _ = io::stderr().flush();
-                    false_neg += 1;
+                    errors.insert(i, ErrorType::FalseNegative);
                 }
             }
         }
         counter += 1;
-        println!("===================================");
+        println!("===========================================");
     }
 
     println!("Finished {} given QCSPs!", counter);
-    if false_pos > 0 || false_neg > 0 {
+    if !errors.is_empty() {
         let _ = io::stdout().flush();
-        eprintln!(
-            "{} false positives and {} false negatives!",
-            false_pos, false_neg
-        );
+        eprintln!("{} ERRORS:", errors.len());
+        for (idx, error) in errors.iter() {
+            eprintln!("Instance {} has error: {}",idx, error);
+        }
     }
 }
 

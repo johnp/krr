@@ -9,10 +9,8 @@ use std::{fmt, iter};
 use itertools::Itertools;
 use unicode_segmentation::UnicodeSegmentation;
 
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
-// TODO: left pad output with zeroes
-// TODO: fast path EMPTY_SET / UNIVERSE lookups (constant fold)
 // TODO: move to naïve arbitrary-sized bit sets using some bitvec/bitfield/bitset crate or rustc's HybridBitSet
 // TODO: move to advanced arbitrary-sized bit sets, e.g. idlset/hibitset/vod
 //       that maybe even support compression/simd/... (Bitmap index compression)
@@ -180,7 +178,7 @@ impl QualitativeCalculus {
                     })
                     .next_tuple()
                     .expect("Composition argument must be a tuple of size 2.");
-                let result = QualitativeCalculus::fold_union(
+                let result = fold_union(
                     res_str.trim_end_matches(')').split_ascii_whitespace().map(
                         |rel| match relations.get(rel) {
                             Some(Relation::BaseRelation(value))
@@ -355,18 +353,6 @@ impl QualitativeCalculus {
         .fuse()
     }
 
-    // TODO: extract function
-    #[inline]
-    fn intersect(rel1: u32, rel2: u32) -> u32 {
-        rel1.bitand(rel2)
-    }
-
-    // TODO: extract function
-    #[inline]
-    fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
-        relations_iter.fold(0, |acc, rel| acc | rel).into()
-    }
-
     pub fn converse_str(&self, relation: &str) -> Relation {
         match self.relations.get(relation) {
             Some(&base_relation) => self.converse(base_relation),
@@ -381,7 +367,7 @@ impl QualitativeCalculus {
             None =>
             // TODO: persist converse if not cheap?
             {
-                (u32::from(*self.relations.get(UNIVERSE).unwrap()) ^ u32::from(relation)).into()
+                (u32::from(self.universe_relation) ^ u32::from(relation)).into()
             }
         }
     }
@@ -405,15 +391,15 @@ impl QualitativeCalculus {
                 self.relation_to_symbol(rel2)
             );
         }
-        let universe_ones = u32::from(*self.relations.get(UNIVERSE).unwrap()).count_ones();
+        let universe_ones = u32::from(self.universe_relation).count_ones();
         match (rel1.count_ones(), rel2.count_ones()) {
             // Any EMPTY_SET => Empty Set
-            (0, _) | (_, 0) => *self.relations.get(EMPTY_SET).unwrap(),
+            (0, _) | (_, 0) => self.empty_relation,
             // Any UNIVERSAL => universal
             (rel1_popcnt, rel2_popcnt)
                 if rel1_popcnt == universe_ones || rel2_popcnt == universe_ones =>
             {
-                *self.relations.get(UNIVERSE).unwrap()
+                self.universe_relation
             }
             // Both base relations => Table lookup
             (1, 1) => match self.compositions.get(&(relations1, relations2)) {
@@ -430,7 +416,7 @@ impl QualitativeCalculus {
             // => Apply RA5 (distributivity of composition)
             (1, _) => {
                 // union(compose(relation1, rel) for rel in relation2)
-                QualitativeCalculus::fold_union(
+                fold_union(
                     self.relation_to_base_relations(relations2)
                         .iter()
                         .map(|&rel2| self.compose(relations1, rel2).into()),
@@ -438,7 +424,7 @@ impl QualitativeCalculus {
             }
             (_, 1) => {
                 // union(compose(rel, relation2) for rel in relation1)
-                QualitativeCalculus::fold_union(
+                fold_union(
                     self.relation_to_base_relations(relations1)
                         .iter()
                         .map(|&rel1| self.compose(rel1, relations2).into()),
@@ -447,7 +433,7 @@ impl QualitativeCalculus {
             // Both sides are not base relations
             (_, _) => {
                 // union(compose(rel1, rel2) for rel1 in relation1 for rel2 in relation2)
-                QualitativeCalculus::fold_union(
+                fold_union(
                     iproduct!(
                         self.relation_to_base_relations(relations1),
                         self.relation_to_base_relations(relations2)
@@ -467,11 +453,11 @@ pub struct Solver<'a> {
     largest_number: u32,
     // TODO: Node(u32)
     relation_instances: HashMap<(u32, u32), Relation>,
+    pub comment: String
 }
 
 impl<'a> fmt::Display for Solver<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f)?;
         if !f.alternate() {
             writeln!(f, "largest_number: {}", self.largest_number)?;
         }
@@ -503,9 +489,7 @@ impl<'a> Solver<'a> {
             .trim()
             .parse::<u32>()
             .expect("The largest number representing a variable must be a positive integer.");
-        // TODO: handle comment somewhere?
-        let _comment = header.next().expect("Expected comment").trim();
-        println!("Comment: {}", _comment);
+        let comment = header.next().expect("Expected comment").trim().to_owned();
 
         for line in lines {
             if line == "." || line.is_empty() {
@@ -567,10 +551,16 @@ impl<'a> Solver<'a> {
             panic!("No relation instances found!");
         }
 
+        let &max_node = relation_instances.keys().map(|(a,b)| a.max(b)).max().unwrap();
+        if max_node > largest_number {
+            panic!("Largest number wrong! (Is {}, but comment says {})", max_node, largest_number);
+        }
+
         Solver {
             calculus,
             largest_number,
             relation_instances,
+            comment
         }
     }
 
@@ -585,9 +575,9 @@ impl<'a> Solver<'a> {
     // TODO: do tuple arguments compile as well as primitives?
     #[inline]
     fn set(&mut self, key: (u32, u32), relation: Relation) {
-        let prev_rel = self.relation_instances.insert(key, relation);
+        let _prev_rel = self.relation_instances.insert(key, relation);
         // also, update reverse relation
-        let prev_conv = self
+        let _prev_conv = self
             .relation_instances
             .insert((key.1, key.0), self.calculus.converse(relation));
         /*
@@ -601,12 +591,11 @@ impl<'a> Solver<'a> {
     }
 
     fn trivially_inconsistent(&self) -> Result<(), String> {
-        for &rel in self.relation_instances.values() {
-            if rel == self.calculus.empty_relation {
-                return Err("Trivially inconsistent.".to_owned());
-            }
+        if self.relation_instances.values().any(|&rel| rel == self.calculus.empty_relation) {
+           Err("Trivially inconsistent.".to_owned())
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     pub fn a_closure_v1(&mut self) -> Result<(), String> {
@@ -638,7 +627,7 @@ impl<'a> Solver<'a> {
         // TODO: better deque? Priority? Implement priority (+version)!
         // TODO: skip all i <= j
         // TODO: skip edges that only have adjacent universal relations
-        // TODO: skip if i == j == UNIVERSE
+        // TODO: skip if i == j == UNIVERSE (worth it?)
         let mut queue: VecDeque<(u32, u32)> =
             iproduct!(0..=self.largest_number, 0..=self.largest_number).collect();
         println!("Initial queue size: {}", queue.len());
@@ -665,6 +654,7 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
+    //noinspection GrazieInspection
     #[inline]
     fn refine(
         &mut self,
@@ -678,8 +668,7 @@ impl<'a> Solver<'a> {
     ) -> Result<(), String> {
         // i,k = intersect(c_ik, compose(c_ij, c_jk))
         let composed = self.calculus.compose(c_ij, c_jk);
-        let refined_ik: Relation =
-            QualitativeCalculus::intersect(c_ik.into(), composed.into()).into();
+        let refined_ik: Relation = intersect(c_ik.into(), composed.into()).into();
 
         if c_ik != refined_ik {
             let tuple = (i, k);
@@ -692,41 +681,33 @@ impl<'a> Solver<'a> {
             } else {
                 None
             };
-            if refined_ik == self.calculus.empty_relation {
+            if refined_ik == self.calculus.empty_relation || DEBUG {
                 let msg =
-                    format!(
-                    "Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}\n\
-                            Remaining queue size: {7:?}\n\
-                            c_ik = {8:011$b}\n\
-                            c_ij = {9:011$b}\n\
-                            c_jk = {10:011$b}",
-                    i, j, k,
-                    self.calculus.relation_to_symbol(c_ik.into()),
-                    self.calculus.relation_to_symbol(c_ij.into()),
-                    self.calculus.relation_to_symbol(c_jk.into()),
-                    self.calculus.relation_to_symbol(refined_ik.into()),
-                    queue.map(|q| q.len()),
-                    u32::from(c_ik), u32::from(c_ij), u32::from(c_jk),
-                    self.calculus.max_encoding_len()
+                    format!("\
+Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
+    c_ik = {7:010$b}
+    c_ij = {8:010$b}
+    c_jk = {9:010$b}
+    {13}
+    comp = {12:010$b}
+    c_ik = {11:010$b}",
+                        i, j, k,
+                        self.calculus.relation_to_symbol(c_ik.into()),
+                        self.calculus.relation_to_symbol(c_ij.into()),
+                        self.calculus.relation_to_symbol(c_jk.into()),
+                        self.calculus.relation_to_symbol(refined_ik.into()),
+                        u32::from(c_ik), u32::from(c_ij), u32::from(c_jk),
+                        self.calculus.max_encoding_len(), u32::from(refined_ik), u32::from(composed),
+                        "‒".repeat(self.calculus.max_encoding_len() + 7)
                 );
-                return Err(msg);
-            } else if DEBUG {
-                println!(
-                    "Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}\n\
-                            c_ik = {7:010$b}\n\
-                            c_ij = {8:010$b}\n\
-                            c_jk = {9:010$b}\n\
-                            ----------------\n\
-                            comp = {12:010$b}\n\
-                            c_ik = {11:010$b}",
-                    i, j, k,
-                    self.calculus.relation_to_symbol(c_ik.into()),
-                    self.calculus.relation_to_symbol(c_ij.into()),
-                    self.calculus.relation_to_symbol(c_jk.into()),
-                    self.calculus.relation_to_symbol(refined_ik.into()),
-                    u32::from(c_ik), u32::from(c_ij), u32::from(c_jk),
-                    self.calculus.max_encoding_len(), u32::from(refined_ik), u32::from(composed)
-                );
+                if refined_ik == self.calculus.empty_relation {
+                    return Err(msg);
+                } else if DEBUG {
+                    println!("{}", msg);
+                }
+                if u32::from(refined_ik) > u32::from(c_ik) {
+                    panic!("Refined to a more general relation!");
+                }
             }
         }
         Ok(())
@@ -742,7 +723,19 @@ impl<'a> Solver<'a> {
 // TODO: bookkeeping of network changes to "undo" dynamically (less memory / no copies)
 // TODO: implement custom inline refinement a-closure
 
-// TODO: MOAR TESTS
+
+
+#[inline]
+fn intersect(rel1: u32, rel2: u32) -> u32 {
+    rel1.bitand(rel2)
+}
+
+#[inline]
+fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
+    relations_iter.fold(0, |acc, rel| acc | rel).into()
+}
+
+// TODO: MOAR TESTS!
 #[cfg(test)]
 mod tests {
     use std::fs;
