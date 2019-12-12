@@ -1,0 +1,28 @@
+[package]
+name = "krr"
+version = "0.2.0"
+authors = ["Johannes Pfrang <johannespfrang@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "krr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "krr"
+path = "src/bin.rs"
+
+[dependencies]
+clap = "2.33"
+itertools = "0.8"
+unicode-segmentation = "1.6"
+#smallvec = "~1.0.0"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "benchmark"
+harness = false
