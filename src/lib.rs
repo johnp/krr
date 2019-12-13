@@ -638,7 +638,11 @@ impl<'a> Solver<'a> {
                 let c_ik = self.lookup(i, k);
                 let c_ij = self.lookup(i, j);
                 let c_jk = self.lookup(j, k);
-                self.refine(i, j, k, c_ik, c_ij, c_jk, None)?;
+                match self.refine(i, j, k, c_ik, c_ij, c_jk, None) {
+                    Ok(true) => s = true, // need to re-loop
+                    Ok(false) => {}, // do nothing
+                    Err(msg) => return Err(msg),
+                };
             }
         }
         Ok(())
@@ -693,7 +697,7 @@ impl<'a> Solver<'a> {
         c_ij: Relation,
         c_jk: Relation,
         mut queue: Option<&mut VecDeque<(u32, u32)>>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         // i,k = intersect(c_ik, compose(c_ij, c_jk))
         let composed = self.calculus.compose(c_ij, c_jk);
         let refined_ik: Relation = intersect(c_ik.into(), composed.into()).into();
@@ -743,8 +747,11 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
                     panic!("Refined to a more general relation!");
                 }
             }
+            // refined successfully
+            return Ok(true);
         }
-        Ok(())
+        // did not refine
+        Ok(false)
     }
 
     // TODO: Universal A-Closure with priorities
