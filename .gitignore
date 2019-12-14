@@ -1,5 +1,6 @@
 /*.txt
 /*.csp
+/perf.data
 
 # Created by https://www.gitignore.io/api/rust,intellij
 # Edit at https://www.gitignore.io/?templates=rust,intellij
