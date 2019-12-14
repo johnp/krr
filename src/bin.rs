@@ -35,10 +35,11 @@ fn main() {
         .version(crate_version!())
         .about(crate_description!())
         .author(crate_authors!("\n"))
-        .arg(Arg::with_name("VERBOSE")
-            .help("Enable verbose output")
-            .short("v")
-            .long("verbose")
+        .arg(
+            Arg::with_name("VERBOSE")
+                .help("Enable verbose output")
+                .short("v")
+                .long("verbose"),
         )
         .arg(
             Arg::with_name("CALC_INPUT")
@@ -132,7 +133,7 @@ fn main() {
                 //println!("Reduced: {:#}", solver);
                 if consistent == Some(false) {
                     let _ = io::stdout().flush();
-                    eprintln!("ERROR: INPUT ASSERTS INCONSISTENCY!");
+                    eprintln!("[ERROR] INPUT ASSERTS INCONSISTENCY!");
                     let _ = io::stderr().flush();
                     errors.insert(i, ErrorType::FalsePositive);
                 }
@@ -141,7 +142,7 @@ fn main() {
                 println!("Result: Not three-consistent, because:\n{}", msg);
                 if consistent == Some(true) {
                     let _ = io::stdout().flush();
-                    eprintln!("ERROR: INPUT ASSERTS CONSISTENCY!");
+                    eprintln!("[ERROR] INPUT ASSERTS CONSISTENCY!");
                     let _ = io::stderr().flush();
                     errors.insert(i, ErrorType::FalseNegative);
                 }
