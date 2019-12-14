@@ -4,6 +4,7 @@ version = "0.3.0"
 authors = ["Johannes Pfrang <johannespfrang@gmail.com>"]
 description = "Knowledge Representation & Reasoning"
 edition = "2018"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
