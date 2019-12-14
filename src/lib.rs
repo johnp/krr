@@ -286,14 +286,49 @@ impl QualitativeCalculus {
         symbols.into_iter().join(",")
     }
 
-    pub fn relation_to_base_relations(&self, relation: Relation) -> Vec<Relation> {
+    // TODO: consider inlining explicitly?
+    // TODO: bench tzcnt+btc+shlx vs blsi+bslr vs blsi+xor: https://godbolt.org/z/CAqCbZ
+    fn relation_to_base_relations(&self, relation: Relation) -> Vec<Relation> {
         if relation == self.empty_relation || relation == self.universe_relation {
             return vec![relation];
         }
         let mut res = Vec::new();
         let mut remaining_relations: u32 = relation.into();
         while remaining_relations != 0 {
+            // compiles to tzcnt+btc+shlx
             let lsb = 1u32 << remaining_relations.trailing_zeros(); // extract lsb
+            remaining_relations ^= lsb; // remove lsb
+            res.push(lsb.into());
+        }
+        res
+    }
+
+    #[allow(dead_code)]
+    fn relation_to_base_relations_blsi_blsr(&self, relation: Relation) -> Vec<Relation> {
+        if relation == self.empty_relation || relation == self.universe_relation {
+            return vec![relation];
+        }
+        let mut res = Vec::new();
+        let mut remaining_relations: u32 = relation.into();
+        while remaining_relations != 0 {
+            // compiles to blsi+blsr
+            let lsb = remaining_relations & remaining_relations.overflowing_neg().0; // extract lsb
+            remaining_relations &= remaining_relations - 1; // remove lsb
+            res.push(lsb.into());
+        }
+        res
+    }
+
+    #[allow(dead_code)]
+    fn relation_to_base_relations_blsi_xor(&self, relation: Relation) -> Vec<Relation> {
+        if relation == self.empty_relation || relation == self.universe_relation {
+            return vec![relation];
+        }
+        let mut res = Vec::new();
+        let mut remaining_relations: u32 = relation.into();
+        while remaining_relations != 0 {
+            // compiles to bsli+xor
+            let lsb = remaining_relations & remaining_relations.overflowing_neg().0; // extract lsb
             remaining_relations ^= lsb; // remove lsb
             res.push(lsb.into());
         }
