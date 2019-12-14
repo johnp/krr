@@ -18,6 +18,7 @@ const DEBUG: bool = false;
 // TODO: (nested) log2 (small)vec for faster constant time access instead of HashMaps
 // TODO: reason about whether it's better to store the 2^n and calculate log2(2^n) on-the-fly
 //       or if we should store n and calculate 2^n on-the-fly (simple bitshift -> better?)
+// TODO: parallelization via rayon
 
 // TODO: use newtypes
 // TODO: derive_more to also derive &, &=, |, and |= or just implement manually
@@ -346,7 +347,7 @@ impl QualitativeCalculus {
         } else {
             let mut remaining_relations: u32 = relation.into();
             Box::new(
-                // TODO: investigate if providing size_hint leads to better compilation
+                // TODO: investigate if providing size_hint leads to better results
                 iter::from_fn(move || {
                     if remaining_relations != 0 {
                         let lsb = 1u32 << remaining_relations.trailing_zeros(); // extract lsb
@@ -411,6 +412,7 @@ impl QualitativeCalculus {
                 } else if relation == self.universe_relation {
                     self.empty_relation
                 } else {
+                    // TODO: directly fold the converses without any vectors
                     let mut res = Vec::new();
                     for rel in self.relation_to_base_relations(relation) {
                         res.push(self.converses.get(&rel).unwrap()); //  TODO: unreachable!()
