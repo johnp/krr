@@ -1,10 +1,10 @@
 #[macro_use]
 extern crate itertools;
 
+use std::{fmt, iter};
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::ops::{BitAnd, BitOr};
-use std::{fmt, iter};
 
 use itertools::Itertools;
 use unicode_segmentation::UnicodeSegmentation;
@@ -32,6 +32,7 @@ const DEBUG: bool = false;
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone, Debug)]
 pub enum Relation {
     // TODO: This distinction is really just for nicer display for now and adds unnecessary computation
+    //       (we could add EmptyRelation/UniverseRelation and make use of this in compose()…)
     BaseRelation(u32),
     ComposedRelation(u32),
 }
@@ -108,6 +109,7 @@ impl fmt::Display for QualitativeCalculus {
 impl QualitativeCalculus {
     // TODO: Buffered Reader(?)
     // TODO: iterate only once; maybe take any Iterator?
+    // TODO: support reading in priorities
     pub fn new(calculus_definition: &str) -> QualitativeCalculus {
         // TODO: Consider not copying the string slices (cost: lifetime bound to argument)
         let mut relation_symbols: HashMap<Relation, String> = HashMap::new();
@@ -393,9 +395,6 @@ impl QualitativeCalculus {
         )
     }
 
-    //pub fn compose_simple(&self, relations1: Relation, relations2: Relation) -> Relation {
-    //}
-
     pub fn compose(&self, relations1: Relation, relations2: Relation) -> Relation {
         let (rel1, rel2): (u32, u32) = (relations1.into(), relations2.into());
         if false {
@@ -405,7 +404,7 @@ impl QualitativeCalculus {
                 self.relation_to_symbol(rel2)
             );
         }
-        let universe_ones = u32::from(self.universe_relation).count_ones();
+        let universe_ones = u32::from(self.universe_relation).count_ones(); // TODO: extract?
         match (rel1.count_ones(), rel2.count_ones()) {
             // Any EMPTY_SET => Empty Set
             (0, _) | (_, 0) => self.empty_relation,
@@ -492,7 +491,7 @@ impl<'a> fmt::Display for Solver<'a> {
 // TODO(all closure algs): Take relation_instances by deep cloned value?
 impl<'a> Solver<'a> {
     // CalculusInstanceSolver / ConstraintReasoner
-    // TODO: sanity-check largest_number
+    // TODO: .lines() iterator allocates String for every line
     pub fn new(calculus: &'a QualitativeCalculus, input: &str) -> Solver<'a> {
         let mut relation_instances: HashMap<(u32, u32), Relation> = HashMap::new();
         let mut lines = input.lines().skip_while(|&l| l.is_empty());
@@ -593,7 +592,7 @@ impl<'a> Solver<'a> {
 
     // TODO: do tuple arguments compile as well as primitives?
     #[inline]
-    fn set(&mut self, key: (u32, u32), relation: Relation) {
+    fn set_with_reverse(&mut self, key: (u32, u32), relation: Relation) {
         let _prev_rel = self.relation_instances.insert(key, relation);
         // also, update reverse relation
         let _prev_conv = self
@@ -603,19 +602,19 @@ impl<'a> Solver<'a> {
         // This sanity check is wrong(?)
         if DEBUG {
             if let (Some(p), Some(pc)) = (prev_rel, prev_conv) {
-                assert_eq!(p, self.calculus.converse(pc), "set revealed previous inconsistency with regards to converse on key {:?}", key);
+                assert_eq!(p, self.calculus.converse(pc), "set() revealed previous inconsistency regarding converse on key {:?}", key);
             }
         }
         */
     }
 
     fn trivially_inconsistent(&self) -> Result<(), String> {
-        if self
+        if let Some((key, _)) = self
             .relation_instances
-            .values()
-            .any(|&rel| rel == self.calculus.empty_relation)
+            .iter()
+            .find(|(_, &rel)| rel == self.calculus.empty_relation)
         {
-            Err("Trivially inconsistent.".to_owned())
+            Err(format!("Trivially inconsistent at ({}, {}).", key.0, key.1))
         } else {
             Ok(())
         }
@@ -640,7 +639,7 @@ impl<'a> Solver<'a> {
                 let c_jk = self.lookup(j, k);
                 match self.refine(i, j, k, c_ik, c_ij, c_jk, None) {
                     Ok(true) => s = true, // need to re-loop
-                    Ok(false) => {}, // do nothing
+                    Ok(false) => {}       // do nothing
                     Err(msg) => return Err(msg),
                 };
             }
@@ -661,7 +660,7 @@ impl<'a> Solver<'a> {
             println!("Initial queue size: {}", queue.len());
         }
         while !queue.is_empty() {
-            let (i, j) = queue.pop_front().unwrap(); // TODO: i==j?
+            let (i, j) = queue.pop_front().unwrap();
             for k in 0..=self.largest_number {
                 if i == j || k == i || k == j {
                     continue;
@@ -696,24 +695,24 @@ impl<'a> Solver<'a> {
         c_ik: Relation,
         c_ij: Relation,
         c_jk: Relation,
-        mut queue: Option<&mut VecDeque<(u32, u32)>>,
+        queue: Option<&mut VecDeque<(u32, u32)>>,
     ) -> Result<bool, String> {
-        // i,k = intersect(c_ik, compose(c_ij, c_jk))
+        // refined_ik = intersect(c_ik, compose(c_ij, c_jk))
         let composed = self.calculus.compose(c_ij, c_jk);
-        let refined_ik: Relation = intersect(c_ik.into(), composed.into()).into();
+        let refined_ik = intersect(c_ik.into(), composed.into()).into();
 
         if c_ik != refined_ik {
             let tuple = (i, k);
-            self.set(tuple, refined_ik);
-            queue = if let Some(q) = queue {
+            self.set_with_reverse(tuple, refined_ik);
+            if let Some(q) = queue {
                 if !q.contains(&tuple) {
                     q.push_back(tuple);
                 }
-                Some(q)
-            } else {
-                None
-            };
+            }
+            // TODO: ensure these if-conditions are coalesced in !DEBUG mode (1 less branch)
+            // TODO: Optimally, DEBUG mode still inlines the format! into the lower if-branches
             if refined_ik == self.calculus.empty_relation || DEBUG {
+                // TODO: it may be better to extract this format! to a non-inlined function
                 let msg = format!(
                     "\
 Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
@@ -741,9 +740,9 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
                 if refined_ik == self.calculus.empty_relation {
                     return Err(msg);
                 } else if DEBUG {
-                    println!("{}", msg);
+                    println!("{}", msg); // TODO: lock stdout for this?
                 }
-                if u32::from(refined_ik) > u32::from(c_ik) {
+                if DEBUG && u32::from(refined_ik) > u32::from(c_ik) {
                     panic!("Refined to a more general relation!");
                 }
             }
@@ -769,6 +768,7 @@ fn intersect(rel1: u32, rel2: u32) -> u32 {
     rel1.bitand(rel2)
 }
 
+// TODO: check if this vectorizes
 #[inline]
 fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
     relations_iter.fold(0, |acc, rel| acc | rel).into()
