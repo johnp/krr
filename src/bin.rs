@@ -5,6 +5,7 @@ extern crate unicode_segmentation;
 use std::fs;
 use std::io;
 use std::iter;
+use std::time::Instant;
 
 use clap::{App, Arg};
 
@@ -109,7 +110,6 @@ fn main() {
         idx = 1;
         Box::new(split)
     };
-    // TODO: very cheap timing information
     for (pc, i) in iter.zip(idx..) {
         if pc.is_empty() {
             continue;
@@ -122,11 +122,13 @@ fn main() {
         );
         let version = matches.value_of("SOLVER").unwrap();
         println!("Solver ({}):\n{}", version, solver);
+        let time = Instant::now();
         let result = match version {
             "v1" => solver.a_closure_v1(),
             "v2" => solver.a_closure_v2(),
             _ => panic!("Unexpected version {}", version),
         };
+        println!("Time: {:?}", time.elapsed());
         match result {
             Ok(()) => {
                 println!("Result: Consistent");
