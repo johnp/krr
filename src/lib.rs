@@ -508,8 +508,11 @@ pub enum ThreeConsistency {}
 pub struct Solver<'a> {
     calculus: &'a QualitativeCalculus,
     largest_number: u32,
-    // TODO: Node(u32)
-    relation_instances: HashMap<(u32, u32), Relation>, // includes the reverse relations
+    // TODO: drop Option and just fill <no_info> with UNIVERSE directly
+    //       (should have the size of the table; u32 instead of Relation might save another 50%)
+    //       (unless (and this is likely) both are optimized into a single u32, in which case we
+    //        *have* to do both to save 50% total)
+    relation_instances: Vec<Vec<Option<Relation>>>, // includes the reverse relations
     pub comment: String,
 }
 
@@ -519,6 +522,7 @@ impl<'a> fmt::Display for Solver<'a> {
             writeln!(f, "largest_number: {}", self.largest_number)?;
         }
         writeln!(f, "relation_instances:")?;
+        /*
         for ((from, to), &rel) in self.relation_instances.iter().sorted() {
             writeln!(
                 f,
@@ -528,6 +532,7 @@ impl<'a> fmt::Display for Solver<'a> {
                 self.calculus.relation_to_symbol(rel.into())
             )?;
         }
+        */
         Ok(())
     }
 }
@@ -606,6 +611,25 @@ impl<'a> Solver<'a> {
             panic!("No relation instances found!");
         }
 
+        let mut instances: Vec<Vec<Option<Relation>>> = vec![vec![None; (largest_number + 1) as usize]; (largest_number + 1) as usize];
+        for ((from, to), &rel) in relation_instances.iter().sorted() {
+            let (i, j) = (*from as usize, *to as usize);
+            if let Some(inner) = instances.get_mut(i) {
+                if let Some(Some(prev)) = inner.get(j) {
+                    inner[j] = Some(Relation::from(u32::from(*prev) | u32::from(rel)));
+                } else {
+                    inner[j] = Some(rel)
+                }
+                //let prev: Relation = inner.get(j).unwrap().unwrap_or(calculus.empty_relation);
+                //inner[j] = Some(Relation::from(u32::from(prev) | u32::from(rel)));
+            } else {
+                panic!("Inner vec not initialized!");
+                //instances[i] = Vec::with_capacity(largest_number as usize);
+                //instances[i][j] = Some(rel);
+            }
+
+        }
+
         let &max_node = relation_instances
             .keys()
             .map(|(a, b)| a.max(b))
@@ -621,15 +645,19 @@ impl<'a> Solver<'a> {
         Solver {
             calculus,
             largest_number,
-            relation_instances,
+            relation_instances: instances,
             comment,
         }
     }
 
     #[inline]
     fn lookup(&self, first: u32, second: u32) -> Relation {
-        match self.relation_instances.get(&(first, second)) {
-            Some(&res) => res,
+        match self.relation_instances.get(first as usize) {
+            Some(inner) => match inner.get(second as usize) {
+                Some(Some(rel)) => *rel,
+                None => self.calculus.universe_relation,
+                _ => self.calculus.universe_relation,
+            },
             None => self.calculus.universe_relation,
         }
     }
@@ -637,11 +665,9 @@ impl<'a> Solver<'a> {
     // TODO: do tuple arguments compile as well as primitives?
     #[inline]
     fn set_with_reverse(&mut self, key: (u32, u32), relation: Relation) {
-        let _prev_rel = self.relation_instances.insert(key, relation);
+        let _prev_rel = self.relation_instances[key.0 as usize][key.1 as usize] = Some(relation);
         // also, update reverse relation
-        let _prev_conv = self
-            .relation_instances
-            .insert((key.1, key.0), self.calculus.converse(relation));
+        let _prev_conv = self.relation_instances[key.1 as usize][key.0 as usize] = Some(self.calculus.converse(relation));
         /*
         // This sanity check is wrong(?)
         if DEBUG {
@@ -653,15 +679,18 @@ impl<'a> Solver<'a> {
     }
 
     fn trivially_inconsistent(&self) -> Result<(), String> {
+        /*
         if let Some((key, _)) = self
             .relation_instances
             .iter()
-            .find(|(_, &rel)| rel == self.calculus.empty_relation)
+            .find(|inner| inner.iter().find(|(_, &rel)| rel == self.calculus.empty_relation))
+
         {
             Err(format!("Trivially inconsistent at ({}, {}).", key.0, key.1))
         } else {
             Ok(())
-        }
+        }*/
+        Ok(())
     }
 
     pub fn a_closure_v1(&mut self) -> Result<(), String> {
