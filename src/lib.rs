@@ -684,15 +684,13 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
-    // TODO: idempotency of converse optimization?
     pub fn a_closure_v2(&mut self) -> Result<(), String> {
         self.trivially_inconsistent()?;
         // TODO: better deque? Priority? Implement priority (+version)!
-        // TODO: skip all i <= j
         // TODO: skip edges that only have adjacent universal relations
         // TODO: skip if i == j == UNIVERSE (worth it? or is the compose-fast-path good enough?)
         let mut queue: VecDeque<(u32, u32)> =
-            iproduct!(0..=self.largest_number, 0..=self.largest_number).collect();
+            iproduct!(0..=self.largest_number, 0..=self.largest_number).filter(|(i, j)| i < j).collect();
         if DEBUG {
             println!("Initial queue size: {}", queue.len());
         }
