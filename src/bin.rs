@@ -167,7 +167,7 @@ fn main() {
 fn comment_parse(comment: &str) -> Option<bool> {
     if comment.contains("NOT consistent") || comment.contains("inconsistent") {
         Some(false)
-    } else if comment.contains("consistent") {
+    } else if comment.contains("consistent") || comment.contains("1-scale-free") {
         Some(true)
     } else {
         None
