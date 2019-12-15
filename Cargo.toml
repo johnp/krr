@@ -25,6 +25,16 @@ unicode-segmentation = "1.6"
 [dev-dependencies]
 criterion = "0.3"
 
+# TODO: PGO in release/bench profiles (https://doc.rust-lang.org/rustc/profile-guided-optimization.html)
+[profile.release]
+lto = true
+debug = true # for perf profiling
+#codegen-units = 1
+
+[profile.bench]
+lto = true
+#codegen-units = 1
+
 [[bench]]
 name = "benchmark"
 harness = false
