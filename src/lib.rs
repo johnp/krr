@@ -502,7 +502,7 @@ pub struct Solver<'a> {
     calculus: &'a QualitativeCalculus,
     largest_number: u32,
     // TODO: Node(u32)
-    relation_instances: HashMap<(u32, u32), Relation>,
+    relation_instances: HashMap<(u32, u32), Relation>, // includes the reverse relations
     pub comment: String,
 }
 
@@ -747,7 +747,7 @@ impl<'a> Solver<'a> {
             // TODO: ensure these if-conditions are coalesced in !DEBUG mode (1 less branch)
             // TODO: Optimally, DEBUG mode still inlines the format! into the lower if-branches
             if refined_ik == self.calculus.empty_relation || DEBUG {
-                // TODO: it may be better to extract this format! to a non-inlined function
+                // TODO: it may be better to extract this format! to an #[inline(never)] function
                 let msg = format!(
                     "\
 Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
