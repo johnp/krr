@@ -2,12 +2,19 @@
 extern crate itertools;
 
 use std::{fmt, iter};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::ops::{BitAnd, BitOr};
 
 use itertools::Itertools;
 use unicode_segmentation::UnicodeSegmentation;
+
+#[cfg(not(any(feature="map-indexmap", feature="map-hashbrown")))]
+use std::collections::HashMap;
+#[cfg(feature="map-indexmap")]
+use indexmap::IndexMap as HashMap;
+#[cfg(feature="map-hashbrown")]
+use hashbrown::HashMap;
 
 const DEBUG: bool = false;
 
@@ -273,7 +280,7 @@ impl QualitativeCalculus {
         let mut remaining_relations = relation;
         while remaining_relations != 0 {
             let single_base_relation = 1u32 << remaining_relations.trailing_zeros();
-            match self.relation_symbols.get(&single_base_relation.into()) {
+            match self.relation_symbols.get(&Relation::from(single_base_relation)) {
                 Some(symbol) => symbols.push(symbol),
                 None => {
                     panic!(
@@ -296,7 +303,7 @@ impl QualitativeCalculus {
         let mut res = Vec::new();
         let mut remaining_relations: u32 = relation.into();
         while remaining_relations != 0 {
-            // compiles to tzcnt+btc+shlx
+            // compiles to tzcnt+btc/xor+shlx
             let lsb = 1u32 << remaining_relations.trailing_zeros(); // extract lsb
             remaining_relations ^= lsb; // remove lsb
             res.push(lsb.into());

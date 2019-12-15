@@ -12,6 +12,14 @@ publish = false
 name = "krr"
 path = "src/lib.rs"
 
+[features]
+# Hashbrown is 2-3 times faster than std::HashMap (due to its faster default hasher)
+default = ["map-hashbrown"]
+# These features are mutually exclusive, but that's still inexpressible in cargo
+# https://github.com/rust-lang/cargo/issues/2980
+map-indexmap = ["indexmap"]
+map-hashbrown = ["hashbrown"]
+
 [[bin]]
 name = "krr"
 path = "src/bin.rs"
@@ -21,6 +29,9 @@ clap = "2.33"
 itertools = "0.8"
 unicode-segmentation = "1.6"
 #smallvec = "~1.0.0"
+# Alternative map implementations
+indexmap = { version = "1.3", optional = true}
+hashbrown = { version = "0.6", optional = true}
 
 [dev-dependencies]
 criterion = "0.3"
