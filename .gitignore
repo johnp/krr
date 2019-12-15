@@ -1,8 +1,10 @@
 /*.txt
 /*.csp
+/perf.sh
 /perf.data
 /perf.data.old
 /*.pl
+/flame*.svg
 
 # Created by https://www.gitignore.io/api/rust,intellij
 # Edit at https://www.gitignore.io/?templates=rust,intellij
