@@ -5,6 +5,7 @@ use std::{fmt, iter};
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::ops::{BitAnd, BitOr};
+use std::num::NonZeroU32;
 
 use itertools::Itertools;
 use unicode_segmentation::UnicodeSegmentation;
@@ -72,7 +73,8 @@ pub struct QualitativeCalculus {
     relations: HashMap<String, Relation>,
     converses: HashMap<Relation, Relation>,
     // TODO: Use something better than a tuple key / use an actual table?
-    compositions: HashMap<(Relation, Relation), Relation>,
+    //       (would it be possible to flatten this?)
+    compositions: TzcntTable, //Vec<Vec<Option<Relation>>>, // <(Relation, Relation), Relation> // &'a[&'a[Relation]]
     empty_relation: Relation,
     universe_relation: Relation,
 }
@@ -101,6 +103,7 @@ impl fmt::Display for QualitativeCalculus {
             )?;
         }
         writeln!(f, "compositions:")?;
+        /*
         for ((rel1, rel2), &res) in self.compositions.iter().sorted() {
             writeln!(
                 f,
@@ -109,7 +112,7 @@ impl fmt::Display for QualitativeCalculus {
                 self.relation_symbols.get(rel2).unwrap(),
                 self.relation_to_symbol(res.into())
             )?;
-        }
+        }*/
         Ok(())
     }
 }
@@ -172,7 +175,7 @@ impl QualitativeCalculus {
             })
             .collect();
 
-        let compositions = calculus_definition
+        let composition_map: HashMap<(Relation, Relation), Relation> = calculus_definition
             .lines()
             .skip_while(|&l| !l.contains("composition"))
             .skip(1)
@@ -200,6 +203,35 @@ impl QualitativeCalculus {
                 ((first, second), result)
             })
             .collect();
+
+        let mut compositions: TzcntTable = TzcntTable::default(); //vec![vec![None; 200]; 200] as TzcntTable;
+        for ((rel1, rel2), res) in composition_map.into_iter() {
+            let i = u32::from(rel1).trailing_zeros() as usize;
+            let j = u32::from(rel2).trailing_zeros() as usize;
+
+            if let Some(inner) = compositions.0.get_mut(i) {
+                if let Some(combined) = inner.get_mut(j) {
+                    //let prev = (*combined).unwrap_or(0.into());
+                    //*combined = Some((u32::from(prev) | u32::from(res)).into());
+                    match *combined {
+                        Some(prev) => *combined = Some(NonZeroU32::new(u32::from(prev) | u32::from(res)).expect("Non-NonZeroU32 (with prev)!")),
+                        None => *combined = Some(NonZeroU32::new(u32::from(res)).expect("Non-NonZeroU32!")),
+                    }
+                } else {
+                    panic!("Could not get inner mut reference");
+                }
+            } else {
+                panic!("Could not get inner mut vector");
+            }
+        }
+        /*
+        for (i, row) in compositions.iter().enumerate() {
+            for (j, &column) in row.iter().enumerate() {
+                if column.is_some() {
+                    println!("{} ⋄ {} ≡ {:?}", relation_symbols.get(&(1 << i).into()).unwrap(), relation_symbols.get(&(1 << j).into()).unwrap(), column);
+                }
+            }
+        }*/
 
         QualitativeCalculus {
             relation_symbols,
@@ -459,8 +491,8 @@ impl QualitativeCalculus {
                 self.universe_relation
             }
             // Both base relations => Table lookup
-            (1, 1) => match self.compositions.get(&(relations1, relations2)) {
-                Some(&result) => result,
+            (1, 1) => match self.compositions.get(relations1, relations2) {
+                Some(&result) => (u32::from(result)).into(),
                 None => {
                     panic!(
                         "Composition of base relations '{} {}' not in composition table",
@@ -814,6 +846,29 @@ fn intersect(rel1: u32, rel2: u32) -> u32 {
 #[inline]
 fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
     relations_iter.fold(0, |acc, rel| acc | rel).into()
+}
+
+#[derive(Debug)]
+struct TzcntTable(pub Vec<Vec<Option<NonZeroU32>>>);
+
+impl Default for TzcntTable {
+    fn default() -> Self {
+        TzcntTable(vec![vec![None; 200]; 200])
+    }
+}
+
+// "Log2Map"
+// TODO: Implement "unsafe" direct array indexing without Option<>
+impl TzcntTable {
+    pub fn get(&self, rel1: Relation, rel2:Relation) -> Option<&NonZeroU32> {
+        let inner = self.0.get(u32::from(rel1).trailing_zeros() as usize)?;
+        Option::from(inner.get(u32::from(rel2).trailing_zeros() as usize)?)
+    }
+
+    pub fn get_mut(&mut self, rel1: Relation, rel2:Relation) -> Option<&mut NonZeroU32> {
+        let inner = self.0.get_mut(u32::from(rel1).trailing_zeros() as usize)?;
+        Option::from(inner.get_mut(u32::from(rel2).trailing_zeros() as usize)?)
+    }
 }
 
 // TODO: MOAR TESTS!
