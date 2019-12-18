@@ -2,7 +2,6 @@
 extern crate itertools;
 
 use std::{fmt, iter};
-use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::ops::{BitAnd, BitOr};
 use std::num::NonZeroU32;
@@ -17,7 +16,11 @@ use indexmap::IndexMap as HashMap;
 #[cfg(feature="map-hashbrown")]
 use hashbrown::HashMap;
 
-const DEBUG: bool = false;
+use keyed_priority_queue::HashKeyedPriorityQueue;
+use std::cmp::{Reverse};
+
+const DEBUG: bool = true;
+const TRACE_REFINEMENTS: bool = true;
 
 // TODO: move to naïve arbitrary-sized bit sets using some bitvec/bitfield/bitset crate or rustc's HybridBitSet
 // TODO: move to advanced arbitrary-sized bit sets, e.g. idlset/hibitset/vod
@@ -71,10 +74,10 @@ const UNIVERSE: &str = "𝓤";
 pub struct QualitativeCalculus {
     relation_symbols: HashMap<Relation, String>,
     relations: HashMap<String, Relation>,
+    // TODO: improve converse storage (TzcntVec?)
     converses: HashMap<Relation, Relation>,
-    // TODO: Use something better than a tuple key / use an actual table?
-    //       (would it be possible to flatten this?)
-    compositions: TzcntTable, //Vec<Vec<Option<Relation>>>, // <(Relation, Relation), Relation> // &'a[&'a[Relation]]
+    // TODO: would it be possible to flatten this?
+    compositions: TzcntTable,
     empty_relation: Relation,
     universe_relation: Relation,
 }
@@ -204,7 +207,7 @@ impl QualitativeCalculus {
             })
             .collect();
 
-        let mut compositions: TzcntTable = TzcntTable::default(); //vec![vec![None; 200]; 200] as TzcntTable;
+        let mut compositions: TzcntTable = TzcntTable::with_size(200);  // TODO: correct size
         for ((rel1, rel2), res) in composition_map.into_iter() {
             let i = u32::from(rel1).trailing_zeros() as usize;
             let j = u32::from(rel2).trailing_zeros() as usize;
@@ -459,6 +462,20 @@ impl QualitativeCalculus {
                     res.into_iter()
                         .fold(0, |acc, &rel| acc | u32::from(rel))
                         .into()
+
+                    /*
+                    let mut remaining_relations: u32 = relation.into();
+                    iter::from_fn(move || {
+                        if remaining_relations != 0 {
+                            let tzcnt = remaining_relations.trailing_zeros();
+                            let lsb = 1u32 << tzcnt; // extract lsb
+                            remaining_relations ^= lsb; // remove lsb
+                            Some(self.converses.get_by_tzcnt(tzcnt))
+                        } else {
+                            None
+                        }
+                    }).fuse()...
+                    */
                 }
             }
         }
@@ -492,7 +509,7 @@ impl QualitativeCalculus {
             }
             // Both base relations => Table lookup
             (1, 1) => match self.compositions.get(relations1, relations2) {
-                Some(&result) => (u32::from(result)).into(),
+                Some(result) => (u32::from(result)).into(),
                 None => {
                     panic!(
                         "Composition of base relations '{} {}' not in composition table",
@@ -534,9 +551,28 @@ impl QualitativeCalculus {
     }
 }
 
-pub enum ThreeConsistency {}
+/*
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+struct Edge {
+    i: u32,
+    j: u32,
+    priority: usize
+}
 
-#[derive(Debug)]
+impl Ord for Edge {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority.cmp(&other.priority).then_with(|| self.i.cmp(&other.i)).then_with(|| self.j.cmp(&other.j))
+    }
+}
+
+impl PartialOrd for Edge {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+*/
+
+#[derive(Debug, Clone)]
 pub struct Solver<'a> {
     calculus: &'a QualitativeCalculus,
     largest_number: u32,
@@ -544,7 +580,9 @@ pub struct Solver<'a> {
     //       (should have the size of the table; u32 instead of Relation might save another 50%)
     //       (unless (and this is likely) both are optimized into a single u32, in which case we
     //        *have* to do both to save 50% total)
+    // TODO: rename to `edges` ?
     relation_instances: Vec<Vec<Option<Relation>>>, // includes the reverse relations
+    priorities: Vec<u32>,
     pub comment: String,
 }
 
@@ -553,7 +591,7 @@ impl<'a> fmt::Display for Solver<'a> {
         if !f.alternate() {
             writeln!(f, "largest_number: {}", self.largest_number)?;
         }
-        writeln!(f, "relation_instances:")?;
+        //writeln!(f, "relation_instances:")?;
         /*
         for ((from, to), &rel) in self.relation_instances.iter().sorted() {
             writeln!(
@@ -569,7 +607,6 @@ impl<'a> fmt::Display for Solver<'a> {
     }
 }
 
-// TODO(all closure algs): Take relation_instances by deep cloned value?
 impl<'a> Solver<'a> {
     // CalculusInstanceSolver / ConstraintReasoner
     // TODO: .lines() iterator allocates String for every line
@@ -659,8 +696,45 @@ impl<'a> Solver<'a> {
                 //instances[i] = Vec::with_capacity(largest_number as usize);
                 //instances[i][j] = Some(rel);
             }
-
         }
+
+        // TODO: move priorities into calculus (?)
+        let max_relation: u32 = calculus.universe_relation.into();
+        let max_relation_ones = max_relation.count_ones();
+        let mut priorities: Vec<u32> = Vec::with_capacity((max_relation + 1) as usize);
+        // TODO: implement & consider base relation priorities (e.g. "=" stronger than ">")
+        for any_relation in 0..=max_relation {
+            let wrapped_relation = Relation::from(any_relation);
+            // pushes to index [any_relation as usize]
+            priorities.push(match wrapped_relation {
+                Relation::BaseRelation(rel) if rel.count_ones() == 0 => {
+                    // empty relation => Maximum priority (shouldn't ever happen(?))
+                    std::u32::MIN
+                },
+                Relation::ComposedRelation(rel) if rel.count_ones() == max_relation_ones => {
+                    // universe relation => Minimum priority
+                    std::u32::MAX
+                },
+                // TODO: is the direction relevant / correct here ?
+                Relation::BaseRelation(_) if false => {
+                    // any other base relation => derive from composition table
+                    let compositions = calculus.compositions.get_all(wrapped_relation);
+                    (compositions.fold(1f32, |acc, (j, res)| {
+                        acc * (1f32 / u32::from(res).count_ones() as f32) // TODO: FIX THIS!!!!!!!!!
+                    }) * 1000f32) as u32
+                },
+                Relation::ComposedRelation(_) | Relation::BaseRelation(_) => {
+                    // any other composed relation => calculate via tightness formula
+                    calculus.relation_to_base_relations(wrapped_relation).into_iter().fold(0, |acc, base_relation| {
+                        acc + calculus.relations.values().fold(0, |acc, &other_base_relation| {
+                            acc + u32::from(calculus.compose(base_relation, other_base_relation)).count_ones()
+                            + u32::from(calculus.compose(calculus.converse(other_base_relation), calculus.converse(base_relation))).count_ones()
+                        })
+                    })
+                },
+            });
+        }
+        //println!("{:?}", priorities.iter().enumerate().collect_vec());
 
         let &max_node = relation_instances
             .keys()
@@ -672,12 +746,15 @@ impl<'a> Solver<'a> {
                 "Largest number wrong! (Is {}, but comment says {})",
                 max_node, largest_number
             );
+        } else if max_node < largest_number {
+            println!("[WARNING] Largest number {0} is greater than actual largest number {1}. Clamping to {1}.", largest_number, max_node);
         }
 
         Solver {
             calculus,
             largest_number,
             relation_instances: instances,
+            priorities,
             comment,
         }
     }
@@ -710,18 +787,21 @@ impl<'a> Solver<'a> {
         */
     }
 
-    fn trivially_inconsistent(&self) -> Result<(), String> {
-        /*
-        if let Some((key, _)) = self
-            .relation_instances
-            .iter()
-            .find(|inner| inner.iter().find(|(_, &rel)| rel == self.calculus.empty_relation))
+    #[inline]
+    fn get_priority(&self, r: Relation) -> u32 {
+        self.priorities[u32::from(r) as usize]
+    }
 
-        {
-            Err(format!("Trivially inconsistent at ({}, {}).", key.0, key.1))
-        } else {
-            Ok(())
-        }*/
+    fn trivially_inconsistent(&self) -> Result<(), String> {
+        for (i, inner) in self.relation_instances.iter().enumerate() {
+            for (j, maybe_rel) in inner.iter().enumerate() {
+                if let Some(rel) = maybe_rel {
+                    if *rel == self.calculus.empty_relation {
+                        return Err(format!("Trivially inconsistent at ({}, {}).", i, j));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -752,18 +832,22 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
+
     pub fn a_closure_v2(&mut self) -> Result<(), String> {
         self.trivially_inconsistent()?;
-        // TODO: better deque? Priority? Implement priority (+version)!
+        // TODO: Maximum size of queue hint to avoid re-allocation
         // TODO: skip edges that only have adjacent universal relations
         // TODO: skip if i == j == UNIVERSE (worth it? or is the compose-fast-path good enough?)
-        let mut queue: VecDeque<(u32, u32)> =
-            iproduct!(0..=self.largest_number, 0..=self.largest_number).filter(|(i, j)| i < j).collect();
+        let mut queue: HashKeyedPriorityQueue<(u32, u32), Reverse<u32>> =
+            iproduct!(0..=self.largest_number, 0..=self.largest_number)
+                // TODO: Idempotency of converse is not always guaranteed!
+                .filter(|&(i, j)| i < j)
+                .map(|(i, j)| ((i, j), Reverse(self.get_priority(self.lookup(i, j)))))
+                .collect();
         if DEBUG {
             println!("Initial queue size: {}", queue.len());
         }
-        while !queue.is_empty() {
-            let (i, j) = queue.pop_front().unwrap();
+        while let Some((&(i, j), _p)) = queue.pop() {
             for k in 0..=self.largest_number {
                 if i == j || k == i || k == j {
                     continue;
@@ -787,6 +871,19 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
+    //
+    // Triangulation:
+    //
+    // Identify sub-graph compute (triangulation = NP-Complete)
+    // restrict operations to sub-graph
+    // heuristic to spend time
+    // ddg: SARISSA
+
+    // TODO: A Universal A-Closure (with laws; triangulation?)
+    pub fn universal_a_closure(&mut self) -> Result<(), String> {
+        unimplemented!()
+    }
+
     //noinspection GrazieInspection
     #[allow(clippy::too_many_arguments)]
     #[inline]
@@ -798,7 +895,7 @@ impl<'a> Solver<'a> {
         c_ik: Relation,
         c_ij: Relation,
         c_jk: Relation,
-        queue: Option<&mut VecDeque<(u32, u32)>>,
+        queue: Option<&mut HashKeyedPriorityQueue<(u32, u32), Reverse<u32>>>,
     ) -> Result<bool, String> {
         // refined_ik = intersect(c_ik, compose(c_ij, c_jk))
         let composed = self.calculus.compose(c_ij, c_jk);
@@ -807,11 +904,7 @@ impl<'a> Solver<'a> {
         if c_ik != refined_ik {
             let tuple = (i, k);
             self.set_with_reverse(tuple, refined_ik);
-            if let Some(q) = queue {
-                if !q.contains(&tuple) {
-                    q.push_back(tuple);
-                }
-            }
+
             // TODO: ensure these if-conditions are coalesced in !DEBUG mode (1 less branch)
             // TODO: Optimally, DEBUG mode still inlines the format! into the lower if-branches
             if refined_ik == self.calculus.empty_relation || DEBUG {
@@ -842,12 +935,12 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
                 );
                 if refined_ik == self.calculus.empty_relation {
                     return Err(msg);
-                } else if DEBUG {
+                } else if DEBUG && TRACE_REFINEMENTS {
                     println!("{}", msg); // TODO: lock stdout for this?
                 }
-                if DEBUG && u32::from(refined_ik) > u32::from(c_ik) {
-                    panic!("Refined to a more general relation!");
-                }
+            }
+            if let Some(q) = queue {
+                q.set((i, k), Reverse(self.get_priority(refined_ik)));
             }
             // refined successfully
             return Ok(true);
@@ -856,15 +949,64 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
         Ok(false)
     }
 
-    // TODO: Universal A-Closure with priorities
-    //fn universal_a_closure(&mut self) -> Result<(), String> {
-    //    unimplemented!()
-    //}
-}
+    // TODO: this could be **SO** much nicer
+    fn non_base_relations_to_fix(&self) -> Vec<(u32, u32)> {
+        let mut res = Vec::new();
+        for (i, inner) in self.relation_instances.iter().enumerate() {
+            for (j, maybe_rel) in inner.iter().enumerate() {
+                if let Some(rel) = maybe_rel {
+                    if u32::from(*rel).count_ones() > 1 {
+                        res.push((i as u32, j as u32))
+                    }
+                }
+            }
+        }
+        res
+    }
 
-// TODO: refinement search
-// TODO: bookkeeping of network changes to "undo" dynamically (less memory / no copies)
-// TODO: implement custom inline refinement a-closure
+    // TODO: bookkeeping of network changes to "undo" dynamically (no expensive cloning)
+    // TODO: count levels going down and going up for DEBUG information for
+    // Reasonable: about 10 to 50 variables in reasonable time
+    pub fn refinement_search_v1(&mut self) -> Result<(), String> {
+        if let Err(msg) = self.a_closure_v2() {
+            if DEBUG {
+                println!("Refinement search subtree failed: {}", msg);
+            }
+            return Err(msg);
+        }
+        if self.relation_instances.iter().all(|inner| inner.iter().all(|rel| {
+            // TODO: can rel ever be None here?
+            rel.is_some() && u32::from(rel.unwrap()).count_ones() == 1
+        })) {
+            if DEBUG {
+                println!("Refinement search: A-closure resulted in base relations only => Success!");
+            }
+            return Ok(());
+        }
+
+        for (i, j) in self.non_base_relations_to_fix() {
+            let composed_relation = self.lookup(i, j);
+            let base_relations = self.calculus.relation_to_base_relations(composed_relation);
+            if DEBUG {
+                println!("Refinement search: {{{:?}}} at ({}, {})", self.calculus.relation_to_symbol(u32::from(composed_relation)), i, j);
+            }
+            for base_relation in base_relations {
+                if DEBUG {
+                    println!("Refinement search: Fixing '{}' at ({}, {})", self.calculus.relation_to_symbol(u32::from(base_relation)), i, j);
+                }
+
+                let mut cloned_solver = self.clone();
+                cloned_solver.set_with_reverse((i, j), base_relation);
+                if cloned_solver.refinement_search_v1().is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        Err("Refinement search failed to find a solution".to_owned())
+    }
+
+    // TODO: other, improved refinement search versions
+}
 
 #[inline]
 fn intersect(rel1: u32, rel2: u32) -> u32 {
@@ -880,23 +1022,29 @@ fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
 #[derive(Debug)]
 struct TzcntTable(pub Vec<Vec<Option<NonZeroU32>>>);
 
-impl Default for TzcntTable {
-    fn default() -> Self {
-        TzcntTable(vec![vec![None; 200]; 200])
+impl TzcntTable {
+    fn with_size(n: usize) -> Self {
+        TzcntTable(vec![vec![None; n]; n])
     }
 }
 
-// "Log2Map"
-// TODO: Implement "unsafe" direct array indexing without Option<>
+// ~"Log2Map" (except for EMPTY/UNIVERSE)
+// TODO: Implement "unsafe" direct array indexing without Option<>?
 impl TzcntTable {
-    pub fn get(&self, rel1: Relation, rel2:Relation) -> Option<&NonZeroU32> {
-        let inner = self.0.get(u32::from(rel1).trailing_zeros() as usize)?;
-        Option::from(inner.get(u32::from(rel2).trailing_zeros() as usize)?)
+    pub fn get_by_tzcnt(&self, left_tzcnt: u32, right_tzcnt: u32) -> Option<NonZeroU32> {
+        let inner = self.0.get(left_tzcnt as usize)?;
+        Option::from(*inner.get(right_tzcnt as usize)?)
     }
 
-    pub fn get_mut(&mut self, rel1: Relation, rel2:Relation) -> Option<&mut NonZeroU32> {
-        let inner = self.0.get_mut(u32::from(rel1).trailing_zeros() as usize)?;
-        Option::from(inner.get_mut(u32::from(rel2).trailing_zeros() as usize)?)
+    pub fn get(&self, rel1: Relation, rel2:Relation) -> Option<NonZeroU32> {
+        let inner = self.0.get(u32::from(rel1).trailing_zeros() as usize)?;
+        Option::from(*inner.get(u32::from(rel2).trailing_zeros() as usize)?)
+    }
+
+    pub fn get_all(&self, rel1: Relation) -> impl Iterator<Item = (u32, NonZeroU32)> + '_ {
+        let inner: &Vec<Option<NonZeroU32>> = self.0.get(u32::from(rel1).trailing_zeros() as usize)
+            .unwrap_or_else(|| panic!("Table row for {:?} is None!", rel1));
+        inner.iter().enumerate().filter(|(_, &o)| o.is_some()).map(|(i, &o)| (1 << i, o.unwrap())).fuse()
     }
 }
 

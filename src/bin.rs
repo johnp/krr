@@ -72,8 +72,8 @@ fn main() {
                 .required(false)
                 // TODO: Increment default version once supported
                 .takes_value(true)
-                .default_value("v1")
-                .possible_values(&["v1", "v2"]),
+                .default_value("v2")
+                .possible_values(&["v1", "v2", "ref1"]),
         )
         .get_matches();
 
@@ -121,11 +121,12 @@ fn main() {
             consistent, solver.comment
         );
         let version = matches.value_of("SOLVER").unwrap();
-        println!("Solver ({}):\n{}", version, solver);
+        println!("Solver (idx: {}, s:{}):\n{}", i, version, solver);
         let time = Instant::now();
         let result = match version {
             "v1" => solver.a_closure_v1(),
             "v2" => solver.a_closure_v2(),
+            "ref1" => solver.refinement_search_v1(),
             _ => panic!("Unexpected version {}", version),
         };
         println!("Time: {:?}", time.elapsed());
