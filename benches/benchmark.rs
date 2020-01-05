@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use krr::{QualitativeCalculus, Solver};
 use std::fs;
+use std::time::Duration;
 
 fn setup_calculus() -> QualitativeCalculus {
     QualitativeCalculus::new(&fs::read_to_string("resources/linear.txt").unwrap())
@@ -68,6 +69,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     {
         let mut med = c.benchmark_group("ia_test_instances_6");
         med.sample_size(1_000);
+        med.measurement_time(Duration::from_secs(10));
 
         let allen_calculus = black_box(setup_allen_calculus());
         let med_solvers = black_box(setup_medium6_solvers(&allen_calculus));
@@ -80,6 +82,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     {
         let mut hard = c.benchmark_group("30x500");
         hard.sample_size(10);
+        hard.measurement_time(Duration::from_secs(60));
 
         let allen2_calculus = black_box(setup_allen2_calculus());
         let hard_solvers = black_box(setup_hard_solvers(&allen2_calculus));
