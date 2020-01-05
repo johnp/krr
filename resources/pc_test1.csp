@@ -1,0 +1,27 @@
+2 # consistent
+0 1 ( < )
+1 2 ( < )
+.
+
+3 # consistent
+0 1 ( > = )
+1 2 ( = > )
+2 3 ( > )
+.
+
+1 # consistent
+0 1 ( = )
+.
+
+2 # inconsistent
+0 1 ( < )
+1 2 ( < )
+0 2 ( > )
+.
+
+4 # inconsistent
+0 1 ( > = )
+1 2 ( = > )
+2 3 ( > )
+0 4 ()
+.

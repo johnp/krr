@@ -1096,15 +1096,15 @@ mod tests {
     // Calculi
 
     fn setup_linear_calculus() -> QualitativeCalculus {
-        QualitativeCalculus::new(&fs::read_to_string("linear.txt").unwrap())
+        QualitativeCalculus::new(&fs::read_to_string("resources/linear.txt").unwrap())
     }
 
     fn setup_allen_calculus() -> QualitativeCalculus {
-        QualitativeCalculus::new(&fs::read_to_string("allen.txt").unwrap())
+        QualitativeCalculus::new(&fs::read_to_string("resources/allen.txt").unwrap())
     }
 
     fn setup_allen2_calculus() -> QualitativeCalculus {
-        QualitativeCalculus::new(&fs::read_to_string("allen2.txt").unwrap())
+        QualitativeCalculus::new(&fs::read_to_string("resources/allen2.txt").unwrap())
     }
 
     // Calculus tests
@@ -1182,7 +1182,7 @@ mod tests {
     // Solvers
 
     fn setup_easy_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
-        let input = fs::read_to_string("pc_test1.csp").unwrap();
+        let input = fs::read_to_string("resources/pc_test1.csp").unwrap();
         let mut solvers = Vec::new();
         for pc in input.split(".\n\n").into_iter() {
             solvers.push(Solver::new(&calculus, pc));
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     fn setup_medium6_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
-        let input = fs::read_to_string("ia_test_instances_6.txt").unwrap();
+        let input = fs::read_to_string("resources/ia_test_instances_6.txt").unwrap();
         let mut solvers = Vec::new();
         for pc in input.split(".\n\n").into_iter() {
             solvers.push(Solver::new(&calculus, pc));
@@ -1200,12 +1200,12 @@ mod tests {
     }
 
     fn setup_hard_solver1(calculus: &QualitativeCalculus) -> Solver {
-        let input = fs::read_to_string("30x500_m_3_allen_eq1.csp").unwrap();
+        let input = fs::read_to_string("resources/30x500_m_3_allen_eq1.csp").unwrap();
         Solver::new(&calculus, &input)
     }
 
     fn setup_hard_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
-        let input = fs::read_to_string("30x500_m_3_allen.csp").unwrap();
+        let input = fs::read_to_string("resources/30x500_m_3_allen.csp").unwrap();
         let mut solvers = Vec::new();
         for pc in input.split(".\n\n").into_iter() {
             solvers.push(Solver::new(&calculus, pc));
@@ -1214,7 +1214,7 @@ mod tests {
     }
 
     fn setup_inconsistent_but_closed_solver(calculus: &QualitativeCalculus) -> Solver {
-        let input = fs::read_to_string("inconsistent_but_closed.csp").unwrap();
+        let input = fs::read_to_string("resources/inconsistent_but_closed.csp").unwrap();
         Solver::new(&calculus, &input)
     }
 
@@ -1262,10 +1262,13 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_hard1() {
-        let calculus = setup_allen_calculus();
-        let mut solver = setup_hard_solver1(&calculus);
-        assert!(solver.a_closure_v2().is_ok())
+    #[ignore] // TODO: add consistency comments to file
+    fn test_v2_hard() {
+        let calculus = setup_allen2_calculus();
+        let mut solvers = setup_hard_solvers(&calculus);
+        for solver in solvers.iter_mut() {
+            try_verify!(solver, solver.a_closure_v2());
+        }
     }
 
     #[test]
@@ -1276,6 +1279,7 @@ mod tests {
     }
 
     #[test]
+    //#[ignore] // this is too slow without `--release`
     fn test_ref1_5_inconsistent_but_closed() {
         let calculus = setup_allen_calculus();
         let mut solver = setup_inconsistent_but_closed_solver(&calculus);

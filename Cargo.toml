@@ -46,6 +46,9 @@ debug = true # for perf profiling
 [profile.bench]
 lto = true
 
+[profile.test]
+opt-level = 2
+
 [[bench]]
 name = "benchmark"
 harness = false

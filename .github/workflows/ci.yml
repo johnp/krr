@@ -10,6 +10,7 @@ env:
 #       (maybe cache the Cargo.lock only for this CI run? And/Or relax the ~/.cargo cache key,
 #        so it works across CI runs?)
 # TODO: cache rustup artifacts (actions-rs/meta#21)
+# TODO: add cargo bench command with cached benchmark results? consider runtime (GitHub free limits)!
 jobs:
   build:
     name: Build
