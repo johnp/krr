@@ -5,6 +5,7 @@
 /perf.data.old
 /*.pl
 /flame*.svg
+/callgrind.*
 
 # Created by https://www.gitignore.io/api/rust,intellij
 # Edit at https://www.gitignore.io/?templates=rust,intellij

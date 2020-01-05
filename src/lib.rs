@@ -1,69 +1,71 @@
 #[macro_use]
 extern crate itertools;
+#[macro_use]
+extern crate smallvec;
+extern crate derive_more;
 
+use std::cmp::Reverse;
+use std::convert::{From, Into};
+use std::iter::Fuse;
+use std::mem::size_of;
 use std::{fmt, iter};
-use std::convert::TryInto;
-use std::ops::{BitAnd, BitOr};
-use std::num::NonZeroU32;
 
+use derive_more::{Binary, BitAnd, BitOr, BitOrAssign, BitXor, BitXorAssign, Display, From, Into};
 use itertools::Itertools;
-use unicode_segmentation::UnicodeSegmentation;
+use smallvec::SmallVec;
+use unicode_width::UnicodeWidthStr;
 
-#[cfg(not(any(feature="map-indexmap", feature="map-hashbrown")))]
-use std::collections::HashMap;
-#[cfg(feature="map-indexmap")]
-use indexmap::IndexMap as HashMap;
-#[cfg(feature="map-hashbrown")]
+#[cfg(feature = "map-hashbrown")]
 use hashbrown::HashMap;
+#[cfg(all(feature = "map-indexmap", not(feature = "map-hashbrown")))]
+use indexmap::IndexMap as HashMap;
+#[cfg(not(any(feature = "map-indexmap", feature = "map-hashbrown")))]
+use std::collections::HashMap;
 
 use keyed_priority_queue::HashKeyedPriorityQueue;
-use std::cmp::{Reverse};
 
-const DEBUG: bool = true;
-const TRACE_REFINEMENTS: bool = true;
+const DEBUG: bool = false;
+const TRACE_REFINEMENTS: bool = false;
 
 // TODO: move to naïve arbitrary-sized bit sets using some bitvec/bitfield/bitset crate or rustc's HybridBitSet
 // TODO: move to advanced arbitrary-sized bit sets, e.g. idlset/hibitset/vod
 //       that maybe even support compression/simd/... (Bitmap index compression)
+// TODO: instead of the above two options, const generics and generic associated types should get us to u128 quite easily
 // TODO: check if we really need a fast hamming weight implementation
-// TODO: (nested) log2 (small)vec for faster constant time access instead of HashMaps
-// TODO: reason about whether it's better to store the 2^n and calculate log2(2^n) on-the-fly
-//       or if we should store n and calculate 2^n on-the-fly (simple bitshift -> better?)
 // TODO: parallelization via rayon
+// TODO: consider the possibility of flattening some of the tables
+// TODO: const generic over the number of base relations could allow for more efficient raw arrays
 
-// TODO: use newtypes
-// TODO: derive_more to also derive &, &=, |, and |= or just implement manually
-//#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone, Debug)]
-//struct UnclassifiedRelation(u32);
-//#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone, Debug)]
-//struct BaseRelation(u32);
-//#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone, Debug)]
-//struct ComposedRelation(u32);
-//#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone, Debug)]
+#[derive(
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Clone,
+    Copy,
+    Debug,
+    Display,
+    Binary,
+    From,
+    Into,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitOrAssign,
+    BitXorAssign,
+)]
+#[display(fmt = "{:b}", "_0")]
+pub struct Relation(u32);
 
-#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone, Debug)]
-pub enum Relation {
-    // TODO: This distinction is really just for nicer display for now and adds unnecessary computation
-    //       (we could add EmptyRelation/UniverseRelation and make use of this in compose()…)
-    BaseRelation(u32),
-    ComposedRelation(u32),
-}
-
-impl From<Relation> for u32 {
-    fn from(relation: Relation) -> Self {
-        match relation {
-            Relation::BaseRelation(inner) | Relation::ComposedRelation(inner) => inner,
-        }
+impl Relation {
+    #[inline(always)]
+    fn count_ones(self) -> u32 {
+        self.0.count_ones()
     }
-}
-
-impl From<u32> for Relation {
-    fn from(value: u32) -> Self {
-        if value.count_ones() <= 1 {
-            Relation::BaseRelation(value) // incl EMPTY_RELATION
-        } else {
-            Relation::ComposedRelation(value) // incl UNIVERSE
-        }
+    #[inline(always)]
+    fn trailing_zeros(self) -> u32 {
+        self.0.trailing_zeros()
     }
 }
 
@@ -80,20 +82,23 @@ pub struct QualitativeCalculus {
     compositions: TzcntTable,
     empty_relation: Relation,
     universe_relation: Relation,
+    universe_popcnt: u32,
 }
 
 impl fmt::Display for QualitativeCalculus {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "QualitativeCalculus:")?;
         writeln!(f, "relation encodings:")?;
+        let max_symbol_len = self.max_symbol_len();
+        let max_encoding_len = self.max_encoding_len();
         for (symbol, rel) in self.relations.iter().sorted() {
+            // Workaround for fonts rendering EMPTY_SET as two columns wide
+            // (just make everything else one column wider)
+            let current_symbol_len = max_symbol_len + (symbol != EMPTY_SET) as usize;
             writeln!(
                 f,
                 "{0:1$}: {2:3$b}",
-                symbol,
-                self.max_symbol_len(),
-                u32::from(*rel),
-                self.max_encoding_len()
+                symbol, current_symbol_len, rel, max_encoding_len
             )?;
         }
         writeln!(f, "converses:")?;
@@ -106,16 +111,21 @@ impl fmt::Display for QualitativeCalculus {
             )?;
         }
         writeln!(f, "compositions:")?;
-        /*
-        for ((rel1, rel2), &res) in self.compositions.iter().sorted() {
-            writeln!(
-                f,
-                "{} ⋄ {} ≡ {}",
-                self.relation_symbols.get(rel1).unwrap(),
-                self.relation_symbols.get(rel2).unwrap(),
-                self.relation_to_symbol(res.into())
-            )?;
-        }*/
+        for (i, outer) in self.compositions.0.iter().enumerate() {
+            for (j, res) in outer.iter().enumerate() {
+                writeln!(
+                    f,
+                    "{} ⋄ {} ≡ {}",
+                    self.relation_symbols
+                        .get(&Relation(2u32.pow(i as u32)))
+                        .unwrap(),
+                    self.relation_symbols
+                        .get(&Relation(2u32.pow(j as u32)))
+                        .unwrap(),
+                    self.relation_to_symbol(Relation(*res))
+                )?;
+            }
+        }
         Ok(())
     }
 }
@@ -127,7 +137,7 @@ impl QualitativeCalculus {
     pub fn new(calculus_definition: &str) -> QualitativeCalculus {
         // TODO: Consider not copying the string slices (cost: lifetime bound to argument)
         let mut relation_symbols: HashMap<Relation, String> = HashMap::new();
-        let empty_relation = 0.into();
+        let empty_relation: Relation = Relation(0);
         relation_symbols.insert(empty_relation, EMPTY_SET.to_owned());
         let mut last_shl = 0;
         for line in calculus_definition
@@ -137,9 +147,10 @@ impl QualitativeCalculus {
             if !line.is_empty() && !line.contains("relations") {
                 for (relation, i) in line.split_ascii_whitespace().zip(0u32..) {
                     relation_symbols.insert(
-                        1u32.checked_shl(i)
-                            .expect("Number of relations must be <= 30.")
-                            .into(),
+                        Relation(
+                            1u32.checked_shl(i)
+                                .expect("Number of relations must be <= 30."),
+                        ),
                         relation.to_owned(),
                     );
                     last_shl = i;
@@ -147,11 +158,11 @@ impl QualitativeCalculus {
                 break; // only one line
             }
         }
-        let universe_relation = (1u32
-            .checked_shl(last_shl + 1)
-            .expect("Number of relations must be <= 30.")
-            - 1)
-        .into();
+        let universe_relation = Relation(
+            1u32.checked_shl(last_shl + 1)
+                .expect("Number of relations must be <= 30.")
+                - 1,
+        );
         relation_symbols.insert(universe_relation, UNIVERSE.to_owned());
 
         let relations: HashMap<String, Relation> = relation_symbols
@@ -178,6 +189,7 @@ impl QualitativeCalculus {
             })
             .collect();
 
+        // TODO: directly fill compositions TzcntTable
         let composition_map: HashMap<(Relation, Relation), Relation> = calculus_definition
             .lines()
             .skip_while(|&l| !l.contains("composition"))
@@ -197,8 +209,7 @@ impl QualitativeCalculus {
                 let result = fold_union(
                     res_str.trim_end_matches(')').split_ascii_whitespace().map(
                         |rel| match relations.get(rel) {
-                            Some(Relation::BaseRelation(value))
-                            | Some(Relation::ComposedRelation(value)) => *value,
+                            Some(value) => *value,
                             _ => panic!("Unexpected relation {} found in composition table", rel),
                         },
                     ),
@@ -207,19 +218,15 @@ impl QualitativeCalculus {
             })
             .collect();
 
-        let mut compositions: TzcntTable = TzcntTable::with_size(200);  // TODO: correct size
+        let mut compositions = TzcntTable::with_size(relations.len() - 2);
         for ((rel1, rel2), res) in composition_map.into_iter() {
-            let i = u32::from(rel1).trailing_zeros() as usize;
-            let j = u32::from(rel2).trailing_zeros() as usize;
+            let i = rel1.trailing_zeros() as usize;
+            let j = rel2.trailing_zeros() as usize;
 
             if let Some(inner) = compositions.0.get_mut(i) {
                 if let Some(combined) = inner.get_mut(j) {
-                    //let prev = (*combined).unwrap_or(0.into());
-                    //*combined = Some((u32::from(prev) | u32::from(res)).into());
-                    match *combined {
-                        Some(prev) => *combined = Some(NonZeroU32::new(u32::from(prev) | u32::from(res)).expect("Non-NonZeroU32 (with prev)!")),
-                        None => *combined = Some(NonZeroU32::new(u32::from(res)).expect("Non-NonZeroU32!")),
-                    }
+                    let prev = *combined;
+                    *combined = prev | u32::from(res);
                 } else {
                     panic!("Could not get inner mut reference");
                 }
@@ -227,14 +234,6 @@ impl QualitativeCalculus {
                 panic!("Could not get inner mut vector");
             }
         }
-        /*
-        for (i, row) in compositions.iter().enumerate() {
-            for (j, &column) in row.iter().enumerate() {
-                if column.is_some() {
-                    println!("{} ⋄ {} ≡ {:?}", relation_symbols.get(&(1 << i).into()).unwrap(), relation_symbols.get(&(1 << j).into()).unwrap(), column);
-                }
-            }
-        }*/
 
         QualitativeCalculus {
             relation_symbols,
@@ -243,22 +242,16 @@ impl QualitativeCalculus {
             compositions,
             empty_relation,
             universe_relation,
+            universe_popcnt: universe_relation.count_ones(),
         }
     }
 
     fn max_symbol_len(&self) -> usize {
-        self.relations
-            .keys()
-            .map(|s| s.graphemes(true).count())
-            .max()
-            .unwrap()
+        self.relations.keys().map(|s| s.width()).max().unwrap()
     }
 
     fn max_encoding_len(&self) -> usize {
-        u32::from(self.universe_relation)
-            .count_ones()
-            .try_into()
-            .unwrap()
+        self.universe_popcnt as usize
     }
 
     #[inline]
@@ -277,45 +270,25 @@ impl QualitativeCalculus {
             relation_symbol
                 .split_ascii_whitespace()
                 .filter_map(move |g| match self.symbol_to_base_relation(g) {
-                    Some(rel) => Some(u32::from(rel)),
+                    Some(rel) => Some(rel),
                     None => None, // silently drop anything not a base relation (e.g. commas)
                 })
-                .fold(0, |acc, rel| acc | rel)
-                .into()
+                // TODO: If all are None we return Relation(0), which may be fine?
+                .fold(Relation(0), |acc, rel| acc | rel)
         }
     }
 
-    // TODO: drop this (unused)
-    // Splits at ASCII whitespaces
-    /* pub fn symbol_to_relations<'a, 'b, 'c: 'ab>(
-        &'a self,
-        relation_symbol: &'b str,
-    ) -> Box<dyn Iterator<Item = Relation> + 'a + 'b> {
-        if let Some(base_rel) = self.symbol_to_base_relation(relation_symbol) {
-            Box::new(iter::once(base_rel))
-        } else {
-            Box::new(
-                relation_symbol
-                    .split_ascii_whitespace()
-                    .filter_map(move |g| match self.symbol_to_base_relation(g) {
-                        Some(rel) => Some(rel),
-                        None => None, // drop anything not a base relation
-                    }),
-            )
-        }
-    }*/
-
-    pub fn relation_to_symbol(&self, relation: u32) -> String {
-        if relation == self.empty_relation.into() {
+    pub fn relation_to_symbol(&self, relation: Relation) -> String {
+        if relation == self.empty_relation {
             return EMPTY_SET.to_owned();
-        } else if relation == self.universe_relation.into() {
+        } else if relation == self.universe_relation {
             return UNIVERSE.to_owned();
         }
         let mut symbols = Vec::new();
         let mut remaining_relations = relation;
-        while remaining_relations != 0 {
+        while remaining_relations != Relation(0) {
             let single_base_relation = 1u32 << remaining_relations.trailing_zeros();
-            match self.relation_symbols.get(&Relation::from(single_base_relation)) {
+            match self.relation_symbols.get(&Relation(single_base_relation)) {
                 Some(symbol) => symbols.push(symbol),
                 None => {
                     panic!(
@@ -324,110 +297,58 @@ impl QualitativeCalculus {
                     );
                 }
             }
-            remaining_relations ^= single_base_relation;
+            remaining_relations ^= Relation(single_base_relation);
         }
         symbols.into_iter().join(",")
     }
 
-    // TODO: consider inlining explicitly?
     // TODO: bench tzcnt+btc+shlx vs blsi+bslr vs blsi+xor: https://godbolt.org/z/CAqCbZ
-    fn relation_to_base_relations(&self, relation: Relation) -> Vec<Relation> {
-        if relation == self.empty_relation || relation == self.universe_relation {
-            return vec![relation];
-        }
-        let mut res = Vec::new();
+    #[allow(dead_code)]
+    fn relation_to_base_relations_old(
+        &self,
+        relation: Relation,
+    ) -> SmallVec<[Relation; size_of::<u32>() * 8]> {
+        let mut res = SmallVec::with_capacity(self.relations.len());
         let mut remaining_relations: u32 = relation.into();
         while remaining_relations != 0 {
             // compiles to tzcnt+btc/xor+shlx
             let lsb = 1u32 << remaining_relations.trailing_zeros(); // extract lsb
             remaining_relations ^= lsb; // remove lsb
-            res.push(lsb.into());
+            res.push(Relation(lsb));
         }
         res
     }
 
-    #[allow(dead_code)]
-    fn relation_to_base_relations_blsi_blsr(&self, relation: Relation) -> Vec<Relation> {
-        if relation == self.empty_relation || relation == self.universe_relation {
-            return vec![relation];
-        }
-        let mut res = Vec::new();
+    #[inline]
+    fn relation_to_base_relations(
+        &self,
+        relation: Relation,
+    ) -> SmallVec<[Relation; size_of::<u32>() * 8]> {
+        let mut res = SmallVec::with_capacity(self.relations.len());
         let mut remaining_relations: u32 = relation.into();
         while remaining_relations != 0 {
             // compiles to blsi+blsr
             let lsb = remaining_relations & remaining_relations.overflowing_neg().0; // extract lsb
             remaining_relations &= remaining_relations - 1; // remove lsb
-            res.push(lsb.into());
+            res.push(Relation(lsb));
         }
         res
     }
 
-    #[allow(dead_code)]
-    fn relation_to_base_relations_blsi_xor(&self, relation: Relation) -> Vec<Relation> {
-        if relation == self.empty_relation || relation == self.universe_relation {
-            return vec![relation];
-        }
-        let mut res = Vec::new();
-        let mut remaining_relations: u32 = relation.into();
-        while remaining_relations != 0 {
-            // compiles to bsli+xor
-            let lsb = remaining_relations & remaining_relations.overflowing_neg().0; // extract lsb
-            remaining_relations ^= lsb; // remove lsb
-            res.push(lsb.into());
-        }
-        res
-    }
-
-    // just prototyping laziness in return type
-    #[allow(dead_code)]
-    fn relation_to_base_relation_iter(
+    #[inline(always)]
+    fn composed_relation_to_base_relations_iter(
         &self,
         relation: Relation,
-    ) -> Box<dyn Iterator<Item = Relation>> {
-        if relation == self.empty_relation || relation == self.universe_relation {
-            Box::new(iter::once(relation))
-        } else {
-            let mut remaining_relations: u32 = relation.into();
-            Box::new(
-                // TODO: investigate if providing size_hint leads to better results
-                iter::from_fn(move || {
-                    if remaining_relations != 0 {
-                        let lsb = 1u32 << remaining_relations.trailing_zeros(); // extract lsb
-                        remaining_relations ^= lsb; // remove lsb
-                        Some(lsb.into())
-                    } else {
-                        None
-                    }
-                })
-                .fuse(),
-            )
-        }
-    }
-
-    // just prototyping laziness in return type
-    #[allow(dead_code)]
-    fn relation_to_base_relation_iter2(
-        &self,
-        relation: Relation,
-    ) -> impl Iterator<Item = Relation> {
-        let mut first = true;
-        let mut finished = false;
+    ) -> Fuse<impl Iterator<Item = Relation> + Clone> {
         let mut remaining_relations: u32 = relation.into();
-        let empty_rel = u32::from(self.empty_relation);
-        let universe = u32::from(self.universe_relation);
+        // TODO: investigate if providing size_hint leads to better results
         iter::from_fn(move || {
-            if first && (remaining_relations == empty_rel || remaining_relations == universe) {
-                first = false;
-                finished = true;
-                Some(relation)
-            } else if !finished && remaining_relations != 0 {
-                first = false;
-                let lsb = 1u32 << remaining_relations.trailing_zeros(); // extract lsb
-                remaining_relations ^= lsb; // remove lsb
-                Some(lsb.into())
+            if remaining_relations != 0 {
+                // compiles to blsi+blsr (around 10% faster than tzcnt+btc/xor+shlx when hot)
+                let lsb = remaining_relations & remaining_relations.overflowing_neg().0; // extract lsb
+                remaining_relations &= remaining_relations - 1; // remove lsb
+                Some(Relation(lsb))
             } else {
-                first = false;
-                finished = true;
                 None
             }
         })
@@ -446,7 +367,7 @@ impl QualitativeCalculus {
         match self.converses.get(&relation) {
             Some(&rel) => rel,
             None =>
-            // TODO: persist converse if not cheap?
+            // TODO: persist converses if not cheap?
             {
                 // TODO: other converse fast paths possible?
                 if relation == self.empty_relation {
@@ -454,28 +375,9 @@ impl QualitativeCalculus {
                 } else if relation == self.universe_relation {
                     self.empty_relation
                 } else {
-                    // TODO: directly fold the converses without any vectors
-                    let mut res = Vec::new();
-                    for rel in self.relation_to_base_relations(relation) {
-                        res.push(self.converses.get(&rel).unwrap()); //  TODO: unreachable!()
-                    }
-                    res.into_iter()
-                        .fold(0, |acc, &rel| acc | u32::from(rel))
-                        .into()
-
-                    /*
-                    let mut remaining_relations: u32 = relation.into();
-                    iter::from_fn(move || {
-                        if remaining_relations != 0 {
-                            let tzcnt = remaining_relations.trailing_zeros();
-                            let lsb = 1u32 << tzcnt; // extract lsb
-                            remaining_relations ^= lsb; // remove lsb
-                            Some(self.converses.get_by_tzcnt(tzcnt))
-                        } else {
-                            None
-                        }
-                    }).fuse()...
-                    */
+                    self.composed_relation_to_base_relations_iter(relation)
+                        .map(|rel| self.converses.get(&rel).unwrap())
+                        .fold(Relation(0), |acc, &rel| acc | rel)
                 }
             }
         }
@@ -488,121 +390,134 @@ impl QualitativeCalculus {
         )
     }
 
-    pub fn compose(&self, relations1: Relation, relations2: Relation) -> Relation {
-        let (rel1, rel2): (u32, u32) = (relations1.into(), relations2.into());
+    #[inline(always)] // ~850ms to 650ms
+    fn get_composition(&self, relation1: Relation, relation2: Relation) -> Relation {
+        unsafe { Relation(self.compositions.unchecked_get(relation1, relation2)) }
+    }
+
+    #[inline(always)] //  ~650ms to 550ms
+    pub fn compose(&self, relation1: Relation, relation2: Relation) -> Relation {
         if false {
             println!(
                 "compose({}, {})",
-                self.relation_to_symbol(rel1),
-                self.relation_to_symbol(rel2)
+                self.relation_to_symbol(relation1),
+                self.relation_to_symbol(relation2)
             );
         }
-        let universe_ones = u32::from(self.universe_relation).count_ones(); // TODO: extract?
-        match (rel1.count_ones(), rel2.count_ones()) {
+        /* // TODO: extracting these from the match to avoid popcnt doesn't actually seem to make a difference
+           //       (may even regress performance slightly...)
+        if relation1 == self.empty_relation || relation2 == self.empty_relation {
+            return self.empty_relation;
+        } else if relation1 == self.universe_relation || relation2 == self.universe_relation {
+            return self.universe_relation;
+        }*/
+        match (relation1.count_ones(), relation2.count_ones()) {
             // Any EMPTY_SET => Empty Set
             (0, _) | (_, 0) => self.empty_relation,
             // Any UNIVERSAL => universal
             (rel1_popcnt, rel2_popcnt)
-                if rel1_popcnt == universe_ones || rel2_popcnt == universe_ones =>
+                if rel1_popcnt == self.universe_popcnt || rel2_popcnt == self.universe_popcnt =>
             {
                 self.universe_relation
             }
             // Both base relations => Table lookup
-            (1, 1) => match self.compositions.get(relations1, relations2) {
-                Some(result) => (u32::from(result)).into(),
-                None => {
-                    panic!(
-                        "Composition of base relations '{} {}' not in composition table",
-                        self.relation_to_symbol(rel1),
-                        self.relation_to_symbol(rel2)
-                    );
-                }
-            },
-            // At least one relation is not a base relation
+            (1, 1) => self.get_composition(relation1, relation2),
+            // Exactly one relation is a base relation
             // => Apply RA5 (distributivity of composition)
             (1, _) => {
                 // union(compose(relation1, rel) for rel in relation2)
                 fold_union(
-                    self.relation_to_base_relations(relations2)
-                        .iter()
-                        .map(|&rel2| self.compose(relations1, rel2).into()),
+                    self.composed_relation_to_base_relations_iter(relation2)
+                        .map(|rel2| self.get_composition(relation1, rel2)),
                 )
             }
             (_, 1) => {
                 // union(compose(rel, relation2) for rel in relation1)
                 fold_union(
-                    self.relation_to_base_relations(relations1)
-                        .iter()
-                        .map(|&rel1| self.compose(rel1, relations2).into()),
+                    self.composed_relation_to_base_relations_iter(relation1)
+                        .map(|rel1| self.get_composition(rel1, relation2)),
                 )
             }
-            // Both sides are not base relations
+            // Both sides are identical composed relations
+            // TODO: measure if this fast-path is worth it
+            (_, _) if relation1 == relation2 => {
+                // union(compose(rel1, rel2) for rel1 in relation1 for rel2 in relation2)
+                let v = self.relation_to_base_relations(relation1);
+
+                let mut res = Relation(0);
+                for &a in v.iter() {
+                    for &b in v.iter() {
+                        res |= self.get_composition(a, b);
+                    }
+                }
+                res
+
+                /* // TODO: measure
+                fold_union(iproduct!(iter, cloned_iter)
+                        .map(|(rel1, rel2)| {
+                            self.get_composition(rel1, rel2)
+                        }),
+                )*/
+            }
+            // Both sides are composed relations
             (_, _) => {
                 // union(compose(rel1, rel2) for rel1 in relation1 for rel2 in relation2)
+                let v = self.relation_to_base_relations(relation2);
+                // TODO: generate-once + clone vs .iter() always ? memcpy iter? (https://github.com/rust-lang/rust/pull/21846#issuecomment-110526401)
+                //       (or is this all irrelevant since the compiler will unroll it anyways? ref: size_hint)
+                let inner = v.iter();
+
+                let mut res = Relation(0);
+                for a in self.composed_relation_to_base_relations_iter(relation1) {
+                    for &b in inner.clone() {
+                        res |= self.get_composition(a, b);
+                    }
+                }
+                res
+
+                /* // TODO: measure
                 fold_union(
                     iproduct!(
-                        self.relation_to_base_relations(relations1),
-                        self.relation_to_base_relations(relations2)
+                        self.composed_relation_to_base_relations_iter(relation1),
+                        self.composed_relation_to_base_relations_iter(relation2)
                     )
-                    .map(|(rel1, rel2)| self.compose(rel1, rel2).into()),
-                )
+                    .map(|(rel1, rel2)| {
+                        self.get_composition(rel1, rel2)
+                    }),
+                )*/
             }
         }
     }
 }
 
-/*
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-struct Edge {
-    i: u32,
-    j: u32,
-    priority: usize
-}
-
-impl Ord for Edge {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.priority.cmp(&other.priority).then_with(|| self.i.cmp(&other.i)).then_with(|| self.j.cmp(&other.j))
-    }
-}
-
-impl PartialOrd for Edge {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-*/
-
 #[derive(Debug, Clone)]
 pub struct Solver<'a> {
     calculus: &'a QualitativeCalculus,
     largest_number: u32,
-    // TODO: drop Option and just fill <no_info> with UNIVERSE directly
-    //       (should have the size of the table; u32 instead of Relation might save another 50%)
-    //       (unless (and this is likely) both are optimized into a single u32, in which case we
-    //        *have* to do both to save 50% total)
     // TODO: rename to `edges` ?
-    relation_instances: Vec<Vec<Option<Relation>>>, // includes the reverse relations
+    relation_instances: Vec<Vec<Relation>>, // includes the reverse relations
     priorities: Vec<u32>,
     pub comment: String,
 }
 
 impl<'a> fmt::Display for Solver<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if !f.alternate() {
-            writeln!(f, "largest_number: {}", self.largest_number)?;
+        writeln!(f, "largest_number: {}", self.largest_number)?;
+        if f.alternate() {
+            // include graph
+            writeln!(f, "relation_instances:")?;
+            for (from, inner) in self.relation_instances.iter().enumerate() {
+                for (to, &rel) in inner.iter().enumerate() {
+                    writeln!(
+                        f,
+                        "{} → {} ≡ {}",
+                        from,
+                        to,
+                        self.calculus.relation_to_symbol(rel)
+                    )?;
+                }
+            }
         }
-        //writeln!(f, "relation_instances:")?;
-        /*
-        for ((from, to), &rel) in self.relation_instances.iter().sorted() {
-            writeln!(
-                f,
-                "{} → {} ≡ {}",
-                from,
-                to,
-                self.calculus.relation_to_symbol(rel.into())
-            )?;
-        }
-        */
         Ok(())
     }
 }
@@ -644,14 +559,12 @@ impl<'a> Solver<'a> {
 
             let relation = relations
                 .iter()
-                .map::<u32, _>(|r| {
+                .map::<Relation, _>(|r| {
                     calculus
                         .symbol_to_base_relation(r)
                         .unwrap_or_else(|| panic!("Could not find symbol '{}' in calculus", r))
-                        .into()
                 })
-                .fold(0, u32::bitor)
-                .into();
+                .fold(Relation(0), |acc, rel| acc | rel);
             if let Some(previous_instance) = relation_instances.insert((first, second), relation) {
                 assert_eq!(
                     previous_instance, relation,
@@ -662,9 +575,8 @@ impl<'a> Solver<'a> {
             // also, insert the converse and sanity-check against any included converse
             let derived_converse = relations
                 .into_iter()
-                .map::<u32, _>(|r| calculus.converse_str(&r).into())
-                .fold(0, u32::bitor)
-                .into();
+                .map::<Relation, _>(|r| calculus.converse_str(&r))
+                .fold(Relation(0), |acc, rel| acc | rel);
             if let Some(included_converse) =
                 relation_instances.insert((second, first), derived_converse)
             {
@@ -680,74 +592,83 @@ impl<'a> Solver<'a> {
             panic!("No relation instances found!");
         }
 
-        let mut instances: Vec<Vec<Option<Relation>>> = vec![vec![None; (largest_number + 1) as usize]; (largest_number + 1) as usize];
+        // Convert HashMap to 2D-Vector
+        // TODO: Omit the initial HashMap and directly parse into flattened 1D-Vector
+        let mut instances: Vec<Vec<Relation>> =
+            vec![
+                vec![calculus.universe_relation; (largest_number + 1) as usize];
+                (largest_number + 1) as usize
+            ];
         for ((from, to), &rel) in relation_instances.iter().sorted() {
             let (i, j) = (*from as usize, *to as usize);
-            if let Some(inner) = instances.get_mut(i) {
-                if let Some(Some(prev)) = inner.get(j) {
-                    inner[j] = Some(Relation::from(u32::from(*prev) | u32::from(rel)));
-                } else {
-                    inner[j] = Some(rel)
-                }
-                //let prev: Relation = inner.get(j).unwrap().unwrap_or(calculus.empty_relation);
-                //inner[j] = Some(Relation::from(u32::from(prev) | u32::from(rel)));
-            } else {
-                panic!("Inner vec not initialized!");
-                //instances[i] = Vec::with_capacity(largest_number as usize);
-                //instances[i][j] = Some(rel);
-            }
+            instances[i][j] = rel;
         }
 
+        // Calculate priorities
         // TODO: move priorities into calculus (?)
-        let max_relation: u32 = calculus.universe_relation.into();
+        let max_relation = calculus.universe_relation;
         let max_relation_ones = max_relation.count_ones();
-        let mut priorities: Vec<u32> = Vec::with_capacity((max_relation + 1) as usize);
+        let mut priorities: Vec<u32> = Vec::with_capacity((u32::from(max_relation) + 1) as usize);
         // TODO: implement & consider base relation priorities (e.g. "=" stronger than ">")
-        for any_relation in 0..=max_relation {
-            let wrapped_relation = Relation::from(any_relation);
+        for any_relation in 0..=max_relation.into() {
+            let wrapped_relation = Relation(any_relation);
             // pushes to index [any_relation as usize]
             priorities.push(match wrapped_relation {
-                Relation::BaseRelation(rel) if rel.count_ones() == 0 => {
+                // TODO: extract these two cases (only happen each once)
+                rel if rel.count_ones() == 0 => {
                     // empty relation => Maximum priority (shouldn't ever happen(?))
                     std::u32::MIN
-                },
-                Relation::ComposedRelation(rel) if rel.count_ones() == max_relation_ones => {
+                }
+                rel if rel.count_ones() == max_relation_ones => {
                     // universe relation => Minimum priority
                     std::u32::MAX
-                },
+                }
                 // TODO: is the direction relevant / correct here ?
-                Relation::BaseRelation(_) if false => {
+                _ if false => {
                     // any other base relation => derive from composition table
+                    /*
                     let compositions = calculus.compositions.get_all(wrapped_relation);
                     (compositions.fold(1f32, |acc, (j, res)| {
-                        acc * (1f32 / u32::from(res).count_ones() as f32) // TODO: FIX THIS!!!!!!!!!
+                        acc * (1f32 / u32::from(res).count_ones() as f32) // TODO: FIX THIS!!
                     }) * 1000f32) as u32
-                },
-                Relation::ComposedRelation(_) | Relation::BaseRelation(_) => {
+                    */
+                    1
+                }
+                //_ if true => { 1 }
+                _ => {
                     // any other composed relation => calculate via tightness formula
-                    calculus.relation_to_base_relations(wrapped_relation).into_iter().fold(0, |acc, base_relation| {
-                        acc + calculus.relations.values().fold(0, |acc, &other_base_relation| {
-                            acc + u32::from(calculus.compose(base_relation, other_base_relation)).count_ones()
-                            + u32::from(calculus.compose(calculus.converse(other_base_relation), calculus.converse(base_relation))).count_ones()
+                    calculus
+                        .composed_relation_to_base_relations_iter(wrapped_relation)
+                        .fold(0, |acc, first_relation| {
+                            acc + calculus
+                                .relations
+                                .values()
+                                .fold(0, |acc, &second_relation| {
+                                    acc + calculus
+                                        .compose(first_relation, second_relation)
+                                        .count_ones()
+                                        + calculus
+                                            .compose(
+                                                calculus.converse(second_relation),
+                                                calculus.converse(first_relation),
+                                            )
+                                            .count_ones()
+                                })
                         })
-                    })
-                },
+                }
             });
         }
         //println!("{:?}", priorities.iter().enumerate().collect_vec());
 
-        let &max_node = relation_instances
-            .keys()
-            .map(|(a, b)| a.max(b))
-            .max()
-            .unwrap();
-        if max_node > largest_number {
-            panic!(
-                "Largest number wrong! (Is {}, but comment says {})",
-                max_node, largest_number
-            );
-        } else if max_node < largest_number {
-            println!("[WARNING] Largest number {0} is greater than actual largest number {1}. Clamping to {1}.", largest_number, max_node);
+        match relation_instances.keys().map(|(a, b)| a.max(b)).max() {
+            Some(&max_node) if max_node > largest_number =>
+                panic!(
+                    "Largest number wrong! (Is {}, but comment says {})",
+                    max_node, largest_number
+                ),
+            Some(&max_node) if max_node < largest_number =>
+                println!("[WARNING] Largest number {0} is greater than actual largest number {1}. Clamping to {1}.", largest_number, max_node),
+            _ => {}
         }
 
         Solver {
@@ -759,46 +680,46 @@ impl<'a> Solver<'a> {
         }
     }
 
-    #[inline]
-    fn lookup(&self, first: u32, second: u32) -> Relation {
-        match self.relation_instances.get(first as usize) {
-            Some(inner) => match inner.get(second as usize) {
-                Some(Some(rel)) => *rel,
-                None => self.calculus.universe_relation,
-                _ => self.calculus.universe_relation,
-            },
-            None => self.calculus.universe_relation,
+    #[inline(always)]
+    fn lookup(&self, from: u32, to: u32) -> Relation {
+        *unsafe {
+            self.relation_instances
+                .get_unchecked(from as usize)
+                .get_unchecked(to as usize)
         }
     }
 
-    // TODO: do tuple arguments compile as well as primitives?
-    #[inline]
-    fn set_with_reverse(&mut self, key: (u32, u32), relation: Relation) {
-        let _prev_rel = self.relation_instances[key.0 as usize][key.1 as usize] = Some(relation);
-        // also, update reverse relation
-        let _prev_conv = self.relation_instances[key.1 as usize][key.0 as usize] = Some(self.calculus.converse(relation));
-        /*
-        // This sanity check is wrong(?)
-        if DEBUG {
-            if let (Some(p), Some(pc)) = (prev_rel, prev_conv) {
-                assert_eq!(p, self.calculus.converse(pc), "set() revealed previous inconsistency regarding converse on key {:?}", key);
-            }
-        }
-        */
+    #[inline(always)]
+    fn set_with_reverse(&mut self, from: u32, to: u32, relation: Relation) {
+        // TODO: bench unsafe get_unchecked_mut here vs safe variant
+        *unsafe {
+            self.relation_instances
+                .get_unchecked_mut(from as usize)
+                .get_unchecked_mut(to as usize)
+        } = relation;
+        *unsafe {
+            self.relation_instances
+                .get_unchecked_mut(to as usize)
+                .get_unchecked_mut(from as usize)
+        } = self.calculus.converse(relation);
+        // safe variant
+        //self.relation_instances[from as usize][to as usize] = relation;
+        //self.relation_instances[to as usize][from as usize] = self.calculus.converse(relation);
     }
 
-    #[inline]
+    #[inline(always)]
     fn get_priority(&self, r: Relation) -> u32 {
-        self.priorities[u32::from(r) as usize]
+        *unsafe { self.priorities.get_unchecked(u32::from(r) as usize) }
+        //self.priorities[u32::from(r) as usize]
     }
 
+    // TODO: make sure that in the refinement algorithm we don't call this after the first time
+    #[inline(never)]
     fn trivially_inconsistent(&self) -> Result<(), String> {
         for (i, inner) in self.relation_instances.iter().enumerate() {
-            for (j, maybe_rel) in inner.iter().enumerate() {
-                if let Some(rel) = maybe_rel {
-                    if *rel == self.calculus.empty_relation {
-                        return Err(format!("Trivially inconsistent at ({}, {}).", i, j));
-                    }
+            for (j, &rel) in inner.iter().enumerate() {
+                if rel == self.calculus.empty_relation {
+                    return Err(format!("Trivially inconsistent at ({}, {}).", i, j));
                 }
             }
         }
@@ -832,22 +753,31 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
-
     pub fn a_closure_v2(&mut self) -> Result<(), String> {
+        self.a_closure_v2q(None)
+    }
+
+    fn a_closure_v2q(
+        &mut self,
+        queue: Option<HashKeyedPriorityQueue<(u32, u32), Reverse<u32>>>,
+    ) -> Result<(), String> {
         self.trivially_inconsistent()?;
         // TODO: Maximum size of queue hint to avoid re-allocation
+        // TODO: Consider radix-heap crate
         // TODO: skip edges that only have adjacent universal relations
         // TODO: skip if i == j == UNIVERSE (worth it? or is the compose-fast-path good enough?)
-        let mut queue: HashKeyedPriorityQueue<(u32, u32), Reverse<u32>> =
+        let mut queue = queue.unwrap_or_else(|| {
             iproduct!(0..=self.largest_number, 0..=self.largest_number)
                 // TODO: Idempotency of converse is not always guaranteed!
                 .filter(|&(i, j)| i < j)
                 .map(|(i, j)| ((i, j), Reverse(self.get_priority(self.lookup(i, j)))))
-                .collect();
+                .collect()
+        });
         if DEBUG {
             println!("Initial queue size: {}", queue.len());
         }
         while let Some((&(i, j), _p)) = queue.pop() {
+            // TODO: pre-compute & restart iterator? this range is about ~10% runtime cost for fast problems
             for k in 0..=self.largest_number {
                 if i == j || k == i || k == j {
                     continue;
@@ -860,7 +790,7 @@ impl<'a> Solver<'a> {
 
                 let c_kj = self.lookup(k, j);
                 let c_ki = self.lookup(k, i);
-                let c_ij = self.lookup(i, j); // TODO: can we skip this lookup?
+                //let c_ij = self.lookup(i, j); // TODO: can we skip this lookup?
 
                 self.refine(k, i, j, c_kj, c_ki, c_ij, Some(&mut queue))?;
             }
@@ -871,6 +801,7 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
+    // TODO: A Universal A-Closure (with laws; triangulation?)
     //
     // Triangulation:
     //
@@ -878,15 +809,13 @@ impl<'a> Solver<'a> {
     // restrict operations to sub-graph
     // heuristic to spend time
     // ddg: SARISSA
-
-    // TODO: A Universal A-Closure (with laws; triangulation?)
     pub fn universal_a_closure(&mut self) -> Result<(), String> {
-        unimplemented!()
+        todo!("Universal A-Closure")
     }
 
     //noinspection GrazieInspection
     #[allow(clippy::too_many_arguments)]
-    #[inline]
+    #[inline(always)]
     fn refine(
         &mut self,
         i: u32,
@@ -898,41 +827,39 @@ impl<'a> Solver<'a> {
         queue: Option<&mut HashKeyedPriorityQueue<(u32, u32), Reverse<u32>>>,
     ) -> Result<bool, String> {
         // refined_ik = intersect(c_ik, compose(c_ij, c_jk))
-        let composed = self.calculus.compose(c_ij, c_jk);
-        let refined_ik = intersect(c_ik.into(), composed.into()).into();
+        let refined_ik = intersect(c_ik, self.calculus.compose(c_ij, c_jk));
 
         if c_ik != refined_ik {
-            let tuple = (i, k);
-            self.set_with_reverse(tuple, refined_ik);
+            self.set_with_reverse(i, k, refined_ik);
 
-            // TODO: ensure these if-conditions are coalesced in !DEBUG mode (1 less branch)
+            // TODO: ensure these if-conditions are coalesced in !DEBUG mode (1 less branch (~2.8%))
             // TODO: Optimally, DEBUG mode still inlines the format! into the lower if-branches
             if refined_ik == self.calculus.empty_relation || DEBUG {
-                // TODO: it may be better to extract this format! to an #[inline(never)] function
+                // TODO: it may be better to extract this format! to an #[inline(never)] function or a macro
+                // TODO: THIS COSTS ABOUT 100ms (~450ms to ~350ms) ?!?! (over 10 seconds in ref1_5)
                 let msg = format!(
                     "\
 Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
     c_ik = {7:010$b}
     c_ij = {8:010$b}
     c_jk = {9:010$b}
-    {13}
-    comp = {12:010$b}
+    {12}
     c_ik = {11:010$b}",
                     i,
                     j,
                     k,
-                    self.calculus.relation_to_symbol(c_ik.into()),
-                    self.calculus.relation_to_symbol(c_ij.into()),
-                    self.calculus.relation_to_symbol(c_jk.into()),
-                    self.calculus.relation_to_symbol(refined_ik.into()),
-                    u32::from(c_ik),
-                    u32::from(c_ij),
-                    u32::from(c_jk),
+                    self.calculus.relation_to_symbol(c_ik),
+                    self.calculus.relation_to_symbol(c_ij),
+                    self.calculus.relation_to_symbol(c_jk),
+                    self.calculus.relation_to_symbol(refined_ik),
+                    c_ik,
+                    c_ij,
+                    c_jk,
                     self.calculus.max_encoding_len(),
-                    u32::from(refined_ik),
-                    u32::from(composed),
+                    refined_ik,
                     "‒".repeat(self.calculus.max_encoding_len() + 7)
                 );
+
                 if refined_ik == self.calculus.empty_relation {
                     return Err(msg);
                 } else if DEBUG && TRACE_REFINEMENTS {
@@ -950,23 +877,18 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
     }
 
     // TODO: this could be **SO** much nicer
-    fn non_base_relations_to_fix(&self) -> Vec<(u32, u32)> {
+    fn nodes_with_non_base_relations_to_fix(&self) -> Vec<(u32, u32)> {
         let mut res = Vec::new();
         for (i, inner) in self.relation_instances.iter().enumerate() {
-            for (j, maybe_rel) in inner.iter().enumerate() {
-                if let Some(rel) = maybe_rel {
-                    if u32::from(*rel).count_ones() > 1 {
-                        res.push((i as u32, j as u32))
-                    }
+            for (j, &rel) in inner.iter().enumerate() {
+                if rel.count_ones() > 1 {
+                    res.push((i as u32, j as u32))
                 }
             }
         }
         res
     }
 
-    // TODO: bookkeeping of network changes to "undo" dynamically (no expensive cloning)
-    // TODO: count levels going down and going up for DEBUG information for
-    // Reasonable: about 10 to 50 variables in reasonable time
     pub fn refinement_search_v1(&mut self) -> Result<(), String> {
         if let Err(msg) = self.a_closure_v2() {
             if DEBUG {
@@ -974,29 +896,43 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
             }
             return Err(msg);
         }
-        if self.relation_instances.iter().all(|inner| inner.iter().all(|rel| {
-            // TODO: can rel ever be None here?
-            rel.is_some() && u32::from(rel.unwrap()).count_ones() == 1
-        })) {
+        if self.relation_instances.iter().all(|inner| {
+            inner.iter().all(|rel| {
+                let popcnt = rel.count_ones();
+                popcnt == 1 || popcnt == self.calculus.universe_popcnt
+            })
+        }) {
             if DEBUG {
-                println!("Refinement search: A-closure resulted in base relations only => Success!");
+                println!(
+                    "Refinement search: A-closure resulted in base relations only => Success!"
+                );
             }
             return Ok(());
         }
 
-        for (i, j) in self.non_base_relations_to_fix() {
+        for (i, j) in self.nodes_with_non_base_relations_to_fix() {
             let composed_relation = self.lookup(i, j);
             let base_relations = self.calculus.relation_to_base_relations(composed_relation);
             if DEBUG {
-                println!("Refinement search: {{{:?}}} at ({}, {})", self.calculus.relation_to_symbol(u32::from(composed_relation)), i, j);
+                println!(
+                    "Refinement search: {{{:?}}} at ({}, {})",
+                    self.calculus.relation_to_symbol(composed_relation),
+                    i,
+                    j
+                );
             }
             for base_relation in base_relations {
                 if DEBUG {
-                    println!("Refinement search: Fixing '{}' at ({}, {})", self.calculus.relation_to_symbol(u32::from(base_relation)), i, j);
+                    println!(
+                        "Refinement search: Fixing '{}' at ({}, {})",
+                        self.calculus.relation_to_symbol(base_relation),
+                        i,
+                        j
+                    );
                 }
 
                 let mut cloned_solver = self.clone();
-                cloned_solver.set_with_reverse((i, j), base_relation);
+                cloned_solver.set_with_reverse(i, j, base_relation);
                 if cloned_solver.refinement_search_v1().is_ok() {
                     return Ok(());
                 }
@@ -1005,46 +941,147 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
         Err("Refinement search failed to find a solution".to_owned())
     }
 
-    // TODO: other, improved refinement search versions
+    pub fn refinement_search_v1_5(&mut self) -> Result<(), String> {
+        self.refinement_search_v1_5q(None)
+    }
+
+    fn refinement_search_v1_5q(
+        &mut self,
+        queue: Option<HashKeyedPriorityQueue<(u32, u32), Reverse<u32>>>,
+    ) -> Result<(), String> {
+        if let Err(msg) = self.a_closure_v2q(queue) {
+            if DEBUG {
+                println!("Refinement search subtree failed: {}", msg);
+            }
+            return Err(msg);
+        }
+
+        if self.relation_instances.iter().all(|inner| {
+            inner.iter().all(|rel| {
+                let popcnt = rel.count_ones();
+                popcnt == 1 || popcnt == self.calculus.universe_popcnt
+            })
+        }) {
+            if DEBUG {
+                println!(
+                    "Refinement search: A-closure resulted in base relations only => Success!"
+                );
+            }
+            return Ok(());
+        }
+
+        for (i, j) in self.nodes_with_non_base_relations_to_fix() {
+            let composed_relation = self.lookup(i, j);
+            let base_relations = self.calculus.relation_to_base_relations(composed_relation);
+            if DEBUG {
+                println!(
+                    "Refinement search: {{{:?}}} at ({}, {})",
+                    self.calculus.relation_to_symbol(composed_relation),
+                    i,
+                    j
+                );
+            }
+            for base_relation in base_relations {
+                if DEBUG {
+                    println!(
+                        "Refinement search: Fixing '{}' at ({}, {})",
+                        self.calculus.relation_to_symbol(base_relation),
+                        i,
+                        j
+                    );
+                }
+
+                let mut cloned_solver = self.clone();
+                cloned_solver.set_with_reverse(i, j, base_relation);
+                let q = iter::once(((i, j), Reverse(1))).collect();
+                if cloned_solver.refinement_search_v1_5q(Some(q)).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        Err("Refinement search failed to find a solution".to_owned())
+    }
+
+    // TODO: bookkeeping of network changes to "undo" dynamically (no expensive cloning)
+    // TODO: count levels going down and going up the tree with DEBUG
+    // TODO: cost of sub-algebra?
+    // Reasonable: about 10 to 50 variables in reasonable time
+    pub fn refinement_search_v2(&mut self) -> Result<(), String> {
+        // A-tractable sub-algebras
+        todo!()
+    }
 }
 
-#[inline]
-fn intersect(rel1: u32, rel2: u32) -> u32 {
-    rel1.bitand(rel2)
+#[inline(always)]
+fn intersect(rel1: Relation, rel2: Relation) -> Relation {
+    rel1 & rel2
 }
 
 // TODO: check if this vectorizes
 #[inline]
-fn fold_union(relations_iter: impl Iterator<Item = u32>) -> Relation {
-    relations_iter.fold(0, |acc, rel| acc | rel).into()
+fn fold_union(relations_iter: impl Iterator<Item = Relation>) -> Relation {
+    relations_iter.fold(Relation(0), |acc, rel| acc | rel)
 }
 
 #[derive(Debug)]
-struct TzcntTable(pub Vec<Vec<Option<NonZeroU32>>>);
+struct TzcntTable(pub Vec<Vec<u32>>);
 
 impl TzcntTable {
     fn with_size(n: usize) -> Self {
-        TzcntTable(vec![vec![None; n]; n])
+        TzcntTable(vec![vec![0; n]; n])
     }
 }
 
 // ~"Log2Map" (except for EMPTY/UNIVERSE)
-// TODO: Implement "unsafe" direct array indexing without Option<>?
 impl TzcntTable {
-    pub fn get_by_tzcnt(&self, left_tzcnt: u32, right_tzcnt: u32) -> Option<NonZeroU32> {
-        let inner = self.0.get(left_tzcnt as usize)?;
-        Option::from(*inner.get(right_tzcnt as usize)?)
+    #[allow(unused)]
+    #[inline(always)]
+    unsafe fn unchecked_get_by_tzcnt(&self, left_tzcnt: u32, right_tzcnt: u32) -> u32 {
+        *self
+            .0
+            .get_unchecked(left_tzcnt as usize)
+            .get_unchecked(right_tzcnt as usize)
     }
 
-    pub fn get(&self, rel1: Relation, rel2:Relation) -> Option<NonZeroU32> {
-        let inner = self.0.get(u32::from(rel1).trailing_zeros() as usize)?;
-        Option::from(*inner.get(u32::from(rel2).trailing_zeros() as usize)?)
+    #[inline(always)]
+    unsafe fn unchecked_get(&self, rel1: Relation, rel2: Relation) -> u32 {
+        *self
+            .0
+            .get_unchecked(rel1.trailing_zeros() as usize)
+            .get_unchecked(rel2.trailing_zeros() as usize)
     }
 
-    pub fn get_all(&self, rel1: Relation) -> impl Iterator<Item = (u32, NonZeroU32)> + '_ {
-        let inner: &Vec<Option<NonZeroU32>> = self.0.get(u32::from(rel1).trailing_zeros() as usize)
-            .unwrap_or_else(|| panic!("Table row for {:?} is None!", rel1));
-        inner.iter().enumerate().filter(|(_, &o)| o.is_some()).map(|(i, &o)| (1 << i, o.unwrap())).fuse()
+    #[allow(unused)]
+    #[inline]
+    fn get(&self, rel1: Relation, rel2: Relation) -> u32 {
+        let inner = self.0.get(rel1.trailing_zeros() as usize).unwrap();
+        *inner.get(rel2.trailing_zeros() as usize).unwrap()
+    }
+    /*
+        #[inline]
+        fn get_all(&self, rel1: Relation) -> impl Iterator<Item = (u32, NonZeroU32)> + '_ {
+            let inner: &Vec<Option<NonZeroU32>> = self
+                .0
+                .get(rel1.trailing_zeros() as usize)
+                .unwrap_or_else(#[cold]|| panic!("Table row for {:?} is None!", rel1));
+            inner
+                .iter()
+                .enumerate()
+                .filter(|(_, &o)| o.is_some())
+                .map(|(i, &o)| (1 << i, o.unwrap()))
+                .fuse()
+        }
+    */
+}
+
+pub fn parse_comment(comment: &str) -> Option<bool> {
+    if comment.contains("NOT consistent") || comment.contains("inconsistent") {
+        Some(false)
+    } else if comment.contains("consistent") || (DEBUG && comment.contains("1-scale-free")) {
+        // technically "None" 1-scale-free is considered Some(true) because I test with it frequently
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -1056,32 +1093,27 @@ mod tests {
 
     use super::*;
 
-    fn setup_calculus() -> QualitativeCalculus {
-        QualitativeCalculus::new(
-            &fs::read_to_string("allen.txt").expect("Failed to read test file."),
-        )
+    // Calculi
+
+    fn setup_linear_calculus() -> QualitativeCalculus {
+        QualitativeCalculus::new(&fs::read_to_string("linear.txt").unwrap())
     }
 
-    fn setup_easy_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
-        let input = fs::read_to_string("pc_test1.csp").expect("Failed to read test file.");
-        let mut solvers = Vec::new();
-        for pc in input.split(".\n\n").into_iter() {
-            solvers.push(Solver::new(&calculus, pc));
-        }
-        solvers
+    fn setup_allen_calculus() -> QualitativeCalculus {
+        QualitativeCalculus::new(&fs::read_to_string("allen.txt").unwrap())
     }
 
-    fn setup_hard_solver1(calculus: &QualitativeCalculus) -> Solver {
-        let input =
-            fs::read_to_string("30x500_m_3_allen_eq1.csp").expect("Failed to read test file.");
-        Solver::new(&calculus, &input)
+    fn setup_allen2_calculus() -> QualitativeCalculus {
+        QualitativeCalculus::new(&fs::read_to_string("allen2.txt").unwrap())
     }
+
+    // Calculus tests
 
     #[test]
     fn test_converse() {
-        let calculus = setup_calculus();
+        let calculus = setup_allen_calculus();
         assert_eq!(
-            calculus.relation_to_symbol(u32::from(calculus.converse_str("EQ"))),
+            calculus.relation_to_symbol(calculus.converse_str("EQ")),
             "EQ"
         );
 
@@ -1101,35 +1133,35 @@ mod tests {
         */
 
         assert_eq!(
-            calculus.relation_to_symbol(u32::from(
-                calculus.converse_str(&format!("EQ {}", EMPTY_SET))
-            )),
+            calculus.relation_to_symbol(calculus.converse_str(&format!("EQ {}", EMPTY_SET))),
             "EQ"
         );
     }
 
     #[test]
     fn test_compose() {
-        let calculus = setup_calculus();
+        let calculus = setup_allen_calculus();
         assert_eq!(
             calculus.compose_str("EQ", "EQ"),
             calculus.symbol_to_base_relation("EQ").unwrap()
         );
         assert_eq!(
-            calculus.relation_to_symbol(u32::from(calculus.compose_str("EQ", EMPTY_SET))),
+            calculus.relation_to_symbol(calculus.compose_str("EQ", EMPTY_SET)),
             EMPTY_SET
         );
         assert_eq!(
-            calculus.relation_to_symbol(u32::from(calculus.compose_str("EQ", UNIVERSE))),
+            calculus.relation_to_symbol(calculus.compose_str("EQ", UNIVERSE)),
             UNIVERSE
         );
     }
 
     #[test]
     fn test_relation_to_relations() {
-        let calculus = setup_calculus();
+        let calculus = setup_allen_calculus();
         assert_eq!(
-            calculus.relation_to_base_relations(calculus.symbol_to_relation("EQ B")),
+            calculus
+                .relation_to_base_relations(calculus.symbol_to_relation("EQ B"))
+                .into_vec(),
             vec![
                 calculus.symbol_to_relation("EQ"),
                 calculus.symbol_to_relation("B")
@@ -1139,11 +1171,114 @@ mod tests {
 
     #[test]
     fn test_rel_to_rel_str() {
-        let calculus = setup_calculus();
-        assert_eq!(calculus.relation_to_symbol(0), EMPTY_SET);
+        let calculus = setup_allen_calculus();
+        assert_eq!(calculus.relation_to_symbol(Relation(0)), EMPTY_SET);
         assert_eq!(
-            calculus.relation_to_symbol(u32::from(calculus.universe_relation)),
+            calculus.relation_to_symbol(calculus.universe_relation),
             UNIVERSE
         );
+    }
+
+    // Solvers
+
+    fn setup_easy_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
+        let input = fs::read_to_string("pc_test1.csp").unwrap();
+        let mut solvers = Vec::new();
+        for pc in input.split(".\n\n").into_iter() {
+            solvers.push(Solver::new(&calculus, pc));
+        }
+        solvers
+    }
+
+    fn setup_medium6_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
+        let input = fs::read_to_string("ia_test_instances_6.txt").unwrap();
+        let mut solvers = Vec::new();
+        for pc in input.split(".\n\n").into_iter() {
+            solvers.push(Solver::new(&calculus, pc));
+        }
+        solvers
+    }
+
+    fn setup_hard_solver1(calculus: &QualitativeCalculus) -> Solver {
+        let input = fs::read_to_string("30x500_m_3_allen_eq1.csp").unwrap();
+        Solver::new(&calculus, &input)
+    }
+
+    fn setup_hard_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
+        let input = fs::read_to_string("30x500_m_3_allen.csp").unwrap();
+        let mut solvers = Vec::new();
+        for pc in input.split(".\n\n").into_iter() {
+            solvers.push(Solver::new(&calculus, pc));
+        }
+        solvers
+    }
+
+    fn setup_inconsistent_but_closed_solver(calculus: &QualitativeCalculus) -> Solver {
+        let input = fs::read_to_string("inconsistent_but_closed.csp").unwrap();
+        Solver::new(&calculus, &input)
+    }
+
+    // Solver tests
+
+    macro_rules! try_verify {
+        ($solver:expr, $alg:expr) => {
+            let result = $alg;
+            match parse_comment(&$solver.comment) {
+                Some(true) if result.is_ok() => {}   // fine
+                Some(false) if result.is_err() => {} // fine
+                None => println!("[WARNING] test case is missing target value"), // indeterminable
+                Some(true) if result.is_err() => panic!("False negative test case result!"),
+                Some(false) if result.is_ok() => panic!("False positive test case result!"),
+                _ => unreachable!(),
+            }
+        };
+    }
+
+    #[test]
+    fn test_v1_easy() {
+        let calculus = setup_linear_calculus();
+        let mut solvers = setup_easy_solvers(&calculus);
+        for solver in solvers.iter_mut() {
+            try_verify!(solver, solver.a_closure_v1());
+        }
+    }
+
+    #[test]
+    fn test_v2_easy() {
+        let calculus = setup_linear_calculus();
+        let mut solvers = setup_easy_solvers(&calculus);
+        for solver in solvers.iter_mut() {
+            try_verify!(solver, solver.a_closure_v2());
+        }
+    }
+
+    #[test]
+    fn test_v2_medium6() {
+        let calculus = setup_allen_calculus();
+        let mut solvers = setup_medium6_solvers(&calculus);
+        for solver in solvers.iter_mut() {
+            try_verify!(solver, solver.a_closure_v2());
+        }
+    }
+
+    #[test]
+    fn test_v2_hard1() {
+        let calculus = setup_allen_calculus();
+        let mut solver = setup_hard_solver1(&calculus);
+        assert!(solver.a_closure_v2().is_ok())
+    }
+
+    #[test]
+    fn test_v2_inconsistent_but_closed() {
+        let calculus = setup_allen_calculus();
+        let mut solver = setup_inconsistent_but_closed_solver(&calculus);
+        assert!(solver.a_closure_v2().is_ok()) // wrong result expected
+    }
+
+    #[test]
+    fn test_ref1_5_inconsistent_but_closed() {
+        let calculus = setup_allen_calculus();
+        let mut solver = setup_inconsistent_but_closed_solver(&calculus);
+        try_verify!(solver, solver.refinement_search_v1_5());
     }
 }

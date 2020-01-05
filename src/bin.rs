@@ -1,19 +1,17 @@
 #[macro_use]
 extern crate clap;
-extern crate unicode_segmentation;
 
+use std::collections::BTreeMap;
+use std::fmt::{Display, Error, Formatter};
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::iter;
 use std::time::Instant;
 
 use clap::{App, Arg};
 
-use krr::QualitativeCalculus;
-use krr::Solver;
-use std::collections::BTreeMap;
-use std::fmt::{Display, Error, Formatter};
-use std::io::Write;
+use krr::*;
 
 #[derive(Debug)]
 enum ErrorType {
@@ -32,6 +30,7 @@ impl Display for ErrorType {
 }
 
 fn main() {
+    #[allow(deprecated)] // TODO: Remove this once Clap macros stopped using std::sync::ONCE_INIT
     let matches = App::new(crate_name!())
         .version(crate_version!())
         .about(crate_description!())
@@ -73,7 +72,7 @@ fn main() {
                 // TODO: Increment default version once supported
                 .takes_value(true)
                 .default_value("v2")
-                .possible_values(&["v1", "v2", "ref1"]),
+                .possible_values(&["v1", "v2", "ref1", "ref1.5"]),
         )
         .get_matches();
 
@@ -85,7 +84,8 @@ fn main() {
         "Using pc input file: {}",
         matches.value_of("PC_INPUT").unwrap()
     );
-    let verbose = matches.value_of("VERBOSE").is_some();
+
+    let verbose = matches.is_present("VERBOSE");
     let calc_input = fs::read_to_string(matches.value_of("CALC_INPUT").unwrap())
         .expect("Failed to read CALC_INPUT file");
     let pc_input = fs::read_to_string(matches.value_of("PC_INPUT").unwrap())
@@ -95,6 +95,7 @@ fn main() {
     if verbose {
         println!("Calculus:\n{}", calculus);
     }
+    let version = matches.value_of("SOLVER").unwrap();
 
     let idx;
     let mut counter = 0;
@@ -115,25 +116,27 @@ fn main() {
             continue;
         }
         let mut solver = Solver::new(&calculus, pc);
-        let consistent: Option<bool> = comment_parse(&solver.comment);
+        let consistent: Option<bool> = parse_comment(&solver.comment);
         println!(
             "Comment (parsed consistent: {:?}): {}",
             consistent, solver.comment
         );
-        let version = matches.value_of("SOLVER").unwrap();
         println!("Solver (idx: {}, s:{}):\n{}", i, version, solver);
         let time = Instant::now();
         let result = match version {
             "v1" => solver.a_closure_v1(),
             "v2" => solver.a_closure_v2(),
             "ref1" => solver.refinement_search_v1(),
+            "ref1.5" => solver.refinement_search_v1_5(),
             _ => panic!("Unexpected version {}", version),
         };
         println!("Time: {:?}", time.elapsed());
         match result {
             Ok(()) => {
                 println!("Result: Consistent");
-                //println!("Reduced: {:#}", solver);
+                if verbose {
+                    println!("Reduced: {:#}", solver);
+                }
                 if consistent == Some(false) {
                     let _ = io::stdout().flush();
                     eprintln!("[ERROR] INPUT ASSERTS INCONSISTENCY!");
@@ -162,15 +165,5 @@ fn main() {
         for (idx, error) in errors.iter() {
             eprintln!("Instance {} has error: {}", idx, error);
         }
-    }
-}
-
-fn comment_parse(comment: &str) -> Option<bool> {
-    if comment.contains("NOT consistent") || comment.contains("inconsistent") {
-        Some(false)
-    } else if comment.contains("consistent") || comment.contains("1-scale-free") {
-        Some(true)
-    } else {
-        None
     }
 }
