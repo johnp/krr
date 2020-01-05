@@ -4,7 +4,7 @@ name: Continuous integration
 
 env:
   # TODO: verify all jobs are guaranteed to run on the same CPU architecture
-  RUSTFLAGS: '-g -C target-cpu=native -C link-arg=-fuse-ld=lld'
+  RUSTFLAGS: '-g -C target-cpu=native'
 
 # TODO: cache rustup artifacts (actions-rs/meta#21)
 jobs:
