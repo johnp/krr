@@ -6,6 +6,9 @@ env:
   # TODO: link with lld (actions/virtual-environments#104)
   RUSTFLAGS: '-g -C target-cpu=native'
 
+# TODO: fix `cargo update` chicken-and-egg problem with regards to ~/.cargo and Cargo.lock
+#       (maybe cache the Cargo.lock only for this CI run? And/Or relax the ~/.cargo cache key,
+#        so it works across CI runs?)
 # TODO: cache rustup artifacts (actions-rs/meta#21)
 jobs:
   build:
