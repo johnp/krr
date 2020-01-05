@@ -713,6 +713,16 @@ impl<'a> Solver<'a> {
         //self.priorities[u32::from(r) as usize]
     }
 
+    fn only_has_base_relations(&self) -> bool {
+        self.relation_instances.iter().all(|inner| {
+            inner.iter().all(|rel| {
+                let popcnt = rel.count_ones();
+                // TODO: make sure universe is a base relation in this context
+                popcnt == 1 || popcnt == self.calculus.universe_popcnt
+            })
+        })
+    }
+
     // TODO: make sure that in the refinement algorithm we don't call this after the first time
     #[inline(never)]
     fn trivially_inconsistent(&self) -> Result<(), String> {
@@ -896,12 +906,7 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
             }
             return Err(msg);
         }
-        if self.relation_instances.iter().all(|inner| {
-            inner.iter().all(|rel| {
-                let popcnt = rel.count_ones();
-                popcnt == 1 || popcnt == self.calculus.universe_popcnt
-            })
-        }) {
+        if self.only_has_base_relations() {
             if DEBUG {
                 println!(
                     "Refinement search: A-closure resulted in base relations only => Success!"
@@ -956,12 +961,7 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
             return Err(msg);
         }
 
-        if self.relation_instances.iter().all(|inner| {
-            inner.iter().all(|rel| {
-                let popcnt = rel.count_ones();
-                popcnt == 1 || popcnt == self.calculus.universe_popcnt
-            })
-        }) {
+        if self.only_has_base_relations() {
             if DEBUG {
                 println!(
                     "Refinement search: A-closure resulted in base relations only => Success!"
