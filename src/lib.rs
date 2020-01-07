@@ -1074,21 +1074,18 @@ impl TzcntTable {
         let inner = self.0.get(rel1.trailing_zeros() as usize).unwrap();
         *inner.get(rel2.trailing_zeros() as usize).unwrap()
     }
-    /*
-        #[inline]
-        fn get_all(&self, rel1: Relation) -> impl Iterator<Item = (u32, NonZeroU32)> + '_ {
-            let inner: &Vec<Option<NonZeroU32>> = self
-                .0
-                .get(rel1.trailing_zeros() as usize)
-                .unwrap_or_else(#[cold]|| panic!("Table row for {:?} is None!", rel1));
+
+    #[inline]
+    fn get_all(&self, rel1: Relation) -> impl Iterator<Item = (Relation, Relation)> + '_ {
+        unsafe {
+            let inner: &Vec<u32> = self.0.get_unchecked(rel1.trailing_zeros() as usize);
             inner
                 .iter()
                 .enumerate()
-                .filter(|(_, &o)| o.is_some())
-                .map(|(i, &o)| (1 << i, o.unwrap()))
-                .fuse()
+                .filter(|(_, &o)| o != 0)
+                .map(|(i, &o)| (Relation((1 << i) as u32), Relation(o)))
         }
-    */
+    }
 }
 
 pub fn parse_comment(comment: &str) -> Option<bool> {
