@@ -25,16 +25,21 @@ use std::collections::HashMap;
 use keyed_priority_queue::HashKeyedPriorityQueue;
 
 const DEBUG: bool = false;
+const DEBUG_A_CLOSURE: bool = false;
 const TRACE_REFINEMENTS: bool = false;
 
+// Long-term:
 // TODO: move to naïve arbitrary-sized bit sets using some bitvec/bitfield/bitset crate or rustc's HybridBitSet
 // TODO: move to advanced arbitrary-sized bit sets, e.g. idlset/hibitset/vod
 //       that maybe even support compression/simd/... (Bitmap index compression)
 // TODO: instead of the above two options, const generics and generic associated types should get us to u128 quite easily
-// TODO: check if we really need a fast hamming weight implementation
-// TODO: parallelization via rayon
-// TODO: consider the possibility of flattening some of the tables
-// TODO: const generic over the number of base relations could allow for more efficient raw arrays
+// TODO: const generic over the number of base relations could simplify some code and may allow for more efficient raw arrays and better unrolling
+
+// "Near"-term:
+// TODO: Figure out why priorities aren't having the expected effect (~0 perf impact (even Reverse()'d))
+// TODO: Flatten 2D-Vectors / Tables to 1D
+// TODO: debug_println! macro
+// TODO: parallelization via rayon (at first just, e.g. clone&divide at top of search tree)
 
 #[derive(
     Eq,
@@ -56,7 +61,7 @@ const TRACE_REFINEMENTS: bool = false;
     BitXorAssign,
 )]
 #[display(fmt = "{:b}", "_0")]
-pub struct Relation(u32);
+pub struct Relation(u32); // TODO: make associated newtype of Calculus ?
 
 impl Relation {
     #[inline(always)]
@@ -74,11 +79,12 @@ const UNIVERSE: &str = "𝓤";
 
 #[derive(Debug)]
 pub struct QualitativeCalculus {
+    // TODO: convert to Vec
     relation_symbols: HashMap<Relation, String>,
     relations: HashMap<String, Relation>,
-    // TODO: improve converse storage (TzcntVec?)
+    // TODO: improve converse storage (TzcntVec? / flattened)
     converses: HashMap<Relation, Relation>,
-    // TODO: would it be possible to flatten this?
+    // TODO: flatten this
     compositions: TzcntTable,
     empty_relation: Relation,
     universe_relation: Relation,
@@ -273,7 +279,7 @@ impl QualitativeCalculus {
                     Some(rel) => Some(rel),
                     None => None, // silently drop anything not a base relation (e.g. commas)
                 })
-                // TODO: If all are None we return Relation(0), which may be fine?
+                // TODO: This really should panic if all are None instead of returning Relation(0)
                 .fold(Relation(0), |acc, rel| acc | rel)
         }
     }
@@ -307,7 +313,7 @@ impl QualitativeCalculus {
     fn relation_to_base_relations_old(
         &self,
         relation: Relation,
-    ) -> SmallVec<[Relation; size_of::<u32>() * 8]> {
+    ) -> SmallVec<[Relation; size_of::<Relation>() * 8]> {
         let mut res = SmallVec::with_capacity(self.relations.len());
         let mut remaining_relations: u32 = relation.into();
         while remaining_relations != 0 {
@@ -323,7 +329,7 @@ impl QualitativeCalculus {
     fn relation_to_base_relations(
         &self,
         relation: Relation,
-    ) -> SmallVec<[Relation; size_of::<u32>() * 8]> {
+    ) -> SmallVec<[Relation; size_of::<Relation>() * 8]> {
         let mut res = SmallVec::with_capacity(self.relations.len());
         let mut remaining_relations: u32 = relation.into();
         while remaining_relations != 0 {
@@ -462,10 +468,10 @@ impl QualitativeCalculus {
             // Both sides are composed relations
             (_, _) => {
                 // union(compose(rel1, rel2) for rel1 in relation1 for rel2 in relation2)
-                let v = self.relation_to_base_relations(relation2);
+                let inner_vec = self.relation_to_base_relations(relation2);
                 // TODO: generate-once + clone vs .iter() always ? memcpy iter? (https://github.com/rust-lang/rust/pull/21846#issuecomment-110526401)
                 //       (or is this all irrelevant since the compiler will unroll it anyways? ref: size_hint)
-                let inner = v.iter();
+                let inner = inner_vec.iter();
 
                 let mut res = Relation(0);
                 for a in self.composed_relation_to_base_relations_iter(relation1) {
@@ -496,13 +502,25 @@ pub struct Solver<'a> {
     largest_number: u32,
     // TODO: rename to `edges` ?
     relation_instances: Vec<Vec<Relation>>, // includes the reverse relations
-    priorities: Vec<u32>,
+    priorities: Vec<u32>,                   // indexed by Relation
     pub comment: String,
 }
 
 impl<'a> fmt::Display for Solver<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "largest_number: {}", self.largest_number)?;
+        if DEBUG || DEBUG_A_CLOSURE {
+            writeln!(f, "priorities:")?;
+            for (r, p) in self.priorities.iter().enumerate() {
+                writeln!(
+                    f,
+                    "{} = {}",
+                    self.calculus.relation_to_symbol(Relation(r as u32)),
+                    p,
+                )?;
+            }
+        }
+
         if f.alternate() {
             // include graph
             writeln!(f, "relation_instances:")?;
@@ -606,37 +624,27 @@ impl<'a> Solver<'a> {
 
         // Calculate priorities
         // TODO: move priorities into calculus (?)
-        let max_relation = calculus.universe_relation;
-        let max_relation_ones = max_relation.count_ones();
-        let mut priorities: Vec<u32> = Vec::with_capacity((u32::from(max_relation) + 1) as usize);
-        // TODO: implement & consider base relation priorities (e.g. "=" stronger than ">")
-        for any_relation in 0..=max_relation.into() {
+        let mut priorities: Vec<u32> =
+            Vec::with_capacity((u32::from(calculus.universe_relation) + 1) as usize);
+        priorities.push(std::u32::MIN); // empty relation => Maximum priority
+                                        // TODO: implement & consider base relation priorities (e.g. "=" stronger than ">")
+        for any_relation in 1..calculus.universe_relation.into() {
             let wrapped_relation = Relation(any_relation);
             // pushes to index [any_relation as usize]
-            priorities.push(match wrapped_relation {
-                // TODO: extract these two cases (only happen each once)
-                rel if rel.count_ones() == 0 => {
-                    // empty relation => Maximum priority (shouldn't ever happen(?))
-                    std::u32::MIN
-                }
-                rel if rel.count_ones() == max_relation_ones => {
-                    // universe relation => Minimum priority
-                    std::u32::MAX
-                }
+            priorities.push(match wrapped_relation.count_ones() {
+                //_ if true => 1, // TODO: this is ~= or faster than what's below...
                 // TODO: is the direction relevant / correct here ?
-                _ if false => {
-                    // any other base relation => derive from composition table
-                    /*
+                1 if false => {
+                    // TODO: is this distinction even needed?
+                    // base relation => derive from composition table
                     let compositions = calculus.compositions.get_all(wrapped_relation);
                     (compositions.fold(1f32, |acc, (j, res)| {
-                        acc * (1f32 / u32::from(res).count_ones() as f32) // TODO: FIX THIS!!
+                        acc * (1f32 / u32::from(res).count_ones() as f32) // TODO: FIX THIS!!!
                     }) * 1000f32) as u32
-                    */
-                    1
                 }
-                //_ if true => { 1 }
                 _ => {
-                    // any other composed relation => calculate via tightness formula
+                    // composed relation => calculate via tightness formula
+                    // TODO: this can be *very* costly to run eagerly (e.g. on mid6)
                     calculus
                         .composed_relation_to_base_relations_iter(wrapped_relation)
                         .fold(0, |acc, first_relation| {
@@ -658,6 +666,12 @@ impl<'a> Solver<'a> {
                 }
             });
         }
+        priorities.push(std::u32::MAX); // universe relation => Minimum priority
+        assert_eq!(
+            priorities.len() as u32,
+            u32::from(calculus.universe_relation) + 1
+        );
+
         //println!("{:?}", priorities.iter().enumerate().collect_vec());
 
         match relation_instances.keys().map(|(a, b)| a.max(b)).max() {
@@ -714,11 +728,13 @@ impl<'a> Solver<'a> {
     }
 
     fn only_has_base_relations(&self) -> bool {
+        // TODO: rename "is_scenario" ?
+        // TODO: "self.relation_values()" iterator?
         self.relation_instances.iter().all(|inner| {
             inner.iter().all(|rel| {
                 let popcnt = rel.count_ones();
-                // TODO: make sure universe is a base relation in this context
-                popcnt == 1 || popcnt == self.calculus.universe_popcnt
+                // TODO: is universe a base relation in this context?
+                popcnt == 1 //|| popcnt == self.calculus.universe_popcnt
             })
         })
     }
@@ -774,7 +790,7 @@ impl<'a> Solver<'a> {
         self.trivially_inconsistent()?;
         // TODO: Maximum size of queue hint to avoid re-allocation
         // TODO: Consider radix-heap crate
-        // TODO: skip edges that only have adjacent universal relations
+        // TODO: skip edges that only have adjacent universal relations?
         // TODO: skip if i == j == UNIVERSE (worth it? or is the compose-fast-path good enough?)
         let mut queue = queue.unwrap_or_else(|| {
             iproduct!(0..=self.largest_number, 0..=self.largest_number)
@@ -783,11 +799,10 @@ impl<'a> Solver<'a> {
                 .map(|(i, j)| ((i, j), Reverse(self.get_priority(self.lookup(i, j)))))
                 .collect()
         });
-        if DEBUG {
+        if DEBUG_A_CLOSURE {
             println!("Initial queue size: {}", queue.len());
         }
         while let Some((&(i, j), _p)) = queue.pop() {
-            // TODO: pre-compute & restart iterator? this range is about ~10% runtime cost for fast problems
             for k in 0..=self.largest_number {
                 if i == j || k == i || k == j {
                     continue;
@@ -805,7 +820,7 @@ impl<'a> Solver<'a> {
                 self.refine(k, i, j, c_kj, c_ki, c_ij, Some(&mut queue))?;
             }
         }
-        if DEBUG {
+        if DEBUG_A_CLOSURE {
             println!("End queue size: {}", queue.len());
         }
         Ok(())
@@ -844,7 +859,7 @@ impl<'a> Solver<'a> {
 
             // TODO: ensure these if-conditions are coalesced in !DEBUG mode (1 less branch (~2.8%))
             // TODO: Optimally, DEBUG mode still inlines the format! into the lower if-branches
-            if refined_ik == self.calculus.empty_relation || DEBUG {
+            if refined_ik == self.calculus.empty_relation || DEBUG_A_CLOSURE {
                 // TODO: it may be better to extract this format! to an #[inline(never)] function or a macro
                 // TODO: THIS COSTS ABOUT 100ms (~450ms to ~350ms) ?!?! (over 10 seconds in ref1_5)
                 let msg = format!(
@@ -877,6 +892,8 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
                 }
             }
             if let Some(q) = queue {
+                // TODO: refined_ik being a subset of c_ik *should* guarantee, that we're always
+                //       inserting an item of equal or higher priority? (ref radix-heap crate)
                 q.set((i, k), Reverse(self.get_priority(refined_ik)));
             }
             // refined successfully
