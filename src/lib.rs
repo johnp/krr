@@ -1620,7 +1620,7 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
                         println!("A-Closure v2 failed...");
                     }
                     // TODO: correct FAIL / backtracking
-                    panic!("Failed, because I can't backtrack yet :(")
+                    todo!("Failed, because I can't backtrack yet :(")
                 }
             }
         }
@@ -1873,15 +1873,27 @@ mod tests {
         for pc in input.split(".\n\n").into_iter() {
             solvers.push(Solver::new(&calculus, pc));
         }
+        assert_eq!(solvers.len(), 5);
         solvers
     }
 
     fn setup_medium6_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
         let input = fs::read_to_string("resources/ia_test_instances_6.txt").unwrap();
         let mut solvers = Vec::new();
-        for pc in input.split(".\n\n").into_iter() {
+        for pc in input.split(".\n").filter(|s| !s.is_empty()) {
             solvers.push(Solver::new(&calculus, pc));
         }
+        assert_eq!(solvers.len(), 30);
+        solvers
+    }
+
+    fn setup_medium10_solvers(calculus: &QualitativeCalculus) -> Vec<Solver> {
+        let input = fs::read_to_string("resources/ia_test_instances_10.txt").unwrap();
+        let mut solvers = Vec::new();
+        for pc in input.split(".\n").filter(|s| !s.is_empty()) {
+            solvers.push(Solver::new(&calculus, pc));
+        }
+        assert_eq!(solvers.len(), 101);
         solvers
     }
 
@@ -1972,10 +1984,52 @@ mod tests {
     }
 
     #[test]
-    //#[ignore] // this is too slow without `--release`
+    #[ignore] // this is too slow without `--release`
     fn test_ref1_5_inconsistent_but_closed() {
         let calculus = setup_allen_calculus();
         let mut solver = setup_inconsistent_but_closed_solver(&calculus);
         try_verify!(solver, solver.refinement_search_v1_5());
+    }
+
+    #[test]
+    #[ignore] // this is also slow without `--release`
+    fn test_ref1_6_inconsistent_but_closed() {
+        let calculus = setup_allen_calculus();
+        let mut solver = setup_inconsistent_but_closed_solver(&calculus);
+        try_verify!(solver, solver.refinement_search_v1_6());
+    }
+
+    #[test]
+    fn test_ref1_9_inconsistent_but_closed() {
+        let calculus = setup_allen_calculus_with_a_tractable();
+        let mut solver = setup_inconsistent_but_closed_solver(&calculus);
+        try_verify!(solver, solver.refinement_search_v1_9());
+    }
+
+    #[test]
+    fn test_ref1_9_medium6() {
+        let calculus = setup_allen_calculus_with_a_tractable();
+        let mut solvers = setup_medium6_solvers(&calculus);
+        for solver in solvers.iter_mut() {
+            try_verify!(solver, solver.a_closure_v2());
+        }
+    }
+
+    #[test]
+    fn test_ref1_9_medium10_partial() {
+        let calculus = setup_allen_calculus_with_a_tractable();
+        let mut solvers = setup_medium10_solvers(&calculus);
+        // TODO: only test some working ones for now
+        let solver = &mut solvers[2];
+        try_verify!(solver, solver.a_closure_v2());
+        let solver = &mut solvers[4];
+        try_verify!(solver, solver.a_closure_v2());
+        let solver = &mut solvers[6];
+        try_verify!(solver, solver.a_closure_v2());
+        let solver = &mut solvers[7];
+        try_verify!(solver, solver.a_closure_v2());
+        //for solver in solvers.iter_mut() {
+        //    try_verify!(solver, solver.a_closure_v2());
+        //}
     }
 }
