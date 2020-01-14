@@ -415,6 +415,7 @@ impl QualitativeCalculus {
                     }
 
                     let goal = Node { rel: Relation(r) };
+                    #[allow(clippy::clone_on_copy)]
                     let path: Vec<(Node, Edge)> = {
                         // TODO: upstream as `build_path_with_edges`
                         let mut rev = vec![(goal.clone(), Edge::zero())];
@@ -1503,7 +1504,7 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
             };
 
             let mut value_queue: HashKeyedPriorityQueue<Relation, u32> = split
-                .into_iter()
+                .iter()
                 .map(|&relation| (relation, self.get_priority(relation)))
                 .collect();
 
