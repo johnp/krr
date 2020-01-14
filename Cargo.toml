@@ -1,6 +1,6 @@
 [package]
 name = "krr"
-version = "0.3.0"
+version = "0.5.0"
 authors = ["Johannes Pfrang <johannespfrang@gmail.com>"]
 description = "Knowledge Representation & Reasoning"
 edition = "2018"
@@ -27,24 +27,30 @@ path = "src/bin.rs"
 [dependencies]
 clap = "2.33"
 itertools = "0.8"
-unicode-segmentation = "1.6"
-#smallvec = "~1.0.0"
+derive_more = "0.99"
+unicode-width = "0.1.7"
+smallvec = "1.0.0"
+# Priority queue implementation (this is the only one that I found that fits all my criteria)
+# TODO: find something even faster (radix-heap ?)
+keyed_priority_queue = { git = "https://github.com/Ten0/keyed_priority_queue.git" }
 # Alternative map implementations
 indexmap = { version = "1.3", optional = true}
 hashbrown = { version = "0.6", optional = true}
+pathfinding = "2.0.3"
+num-traits = "0.2.6" # for custom pathfinding edges
 
 [dev-dependencies]
 criterion = "0.3"
 
-# TODO: PGO in release/bench profiles (https://doc.rust-lang.org/rustc/profile-guided-optimization.html)
 [profile.release]
 lto = true
 debug = true # for perf profiling
-#codegen-units = 1
 
 [profile.bench]
 lto = true
-#codegen-units = 1
+
+[profile.test]
+opt-level = 2
 
 [[bench]]
 name = "benchmark"

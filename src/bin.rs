@@ -1,19 +1,18 @@
 #[macro_use]
 extern crate clap;
-extern crate unicode_segmentation;
 
+use std::collections::BTreeMap;
+use std::fmt::{Display, Error, Formatter};
 use std::fs;
 use std::io;
+use std::io::{Read, Write};
 use std::iter;
 use std::time::Instant;
 
 use clap::{App, Arg};
 
-use krr::QualitativeCalculus;
-use krr::Solver;
-use std::collections::BTreeMap;
-use std::fmt::{Display, Error, Formatter};
-use std::io::Write;
+use krr::*;
+use std::borrow::Borrow;
 
 #[derive(Debug)]
 enum ErrorType {
@@ -32,31 +31,33 @@ impl Display for ErrorType {
 }
 
 fn main() {
+    #[allow(deprecated)] // TODO: Remove this once Clap macros stopped using std::sync::ONCE_INIT
     let matches = App::new(crate_name!())
         .version(crate_version!())
         .about(crate_description!())
         .author(crate_authors!("\n"))
         .arg(
             Arg::with_name("VERBOSE")
-                .help("Enable verbose output")
+                .help("Enable verbose output. Multiple occurrences increase verbosity.")
                 .short("v")
-                .long("verbose"),
+                .long("verbose")
+                .multiple(true),
         )
         .arg(
             Arg::with_name("CALC_INPUT")
-                .help("Calculus input file to read")
+                .help("Calculus input file to read.")
                 .required(true)
                 .index(1),
         )
         .arg(
             Arg::with_name("PC_INPUT")
-                .help("Instance input file to read")
+                .help("Instance input file to read. \"-\" reads from standard input.")
                 .required(true)
                 .index(2),
         )
         .arg(
             Arg::with_name("PC_INDEX")
-                .help("Index, starting at 1, of the instance to solve (within the given file)")
+                .help("Index, starting at 1, of the instance to solve (within the given file).")
                 .required(false)
                 .validator(|s| match s.parse::<usize>() {
                     Ok(_) => Ok(()),
@@ -68,71 +69,105 @@ fn main() {
             Arg::with_name("SOLVER")
                 .short("s")
                 .long("solver")
-                .help("Solver (version) to use (A-Closure)")
+                .help("Solver (version) to use.")
                 .required(false)
-                // TODO: Increment default version once supported
                 .takes_value(true)
-                .default_value("v1")
-                .possible_values(&["v1", "v2"]),
+                .default_value("v2")
+                .possible_values(&["v1", "v2", "ref1", "ref1.5", "ref1.6", "ref1.9", "ref2"]),
+        )
+        .arg(
+            Arg::with_name("A_TRACTABLE")
+                .short("a")
+                .long("a-tractable")
+                .help("A-tractable sub-algebras input file to read")
+                .required(false)
+                .takes_value(true),
         )
         .get_matches();
 
-    println!(
-        "Using calc input file: {}",
-        matches.value_of("CALC_INPUT").unwrap()
-    );
-    println!(
-        "Using pc input file: {}",
-        matches.value_of("PC_INPUT").unwrap()
-    );
-    let verbose = matches.value_of("VERBOSE").is_some();
+    let verbose_count = matches.occurrences_of("VERBOSE");
     let calc_input = fs::read_to_string(matches.value_of("CALC_INPUT").unwrap())
         .expect("Failed to read CALC_INPUT file");
-    let pc_input = fs::read_to_string(matches.value_of("PC_INPUT").unwrap())
-        .expect("Failed to read PC_INPUT file");
+    let pc_input = match matches.value_of("PC_INPUT").unwrap() {
+        "-" => {
+            let mut s = String::new();
+            io::stdin()
+                .read_to_string(&mut s)
+                .expect("Error reading STDIN");
+            s
+        }
+        path => fs::read_to_string(path).expect("Failed to read PC_INPUT file"),
+    };
+    let a_tractable = matches
+        .value_of("A_TRACTABLE")
+        .map(|path| fs::read_to_string(path).expect("Failed to read A_TRACTABLE file"));
 
-    let calculus = QualitativeCalculus::new(&calc_input);
-    if verbose {
+    if verbose_count >= 3 {
+        println!("Using calculus input file: {}", calc_input);
+        if pc_input == "-" {
+            println!("Reading pc from stdin");
+        } else {
+            println!("Using pc input file: {}", pc_input);
+        }
+        if let Some(path) = a_tractable.borrow() {
+            println!("Using a-tractable file: {}", path);
+        }
+    }
+
+    let calculus = QualitativeCalculus::with_a_tractable(&calc_input, a_tractable.as_deref());
+    if verbose_count >= 2 {
         println!("Calculus:\n{}", calculus);
     }
 
+    let version = matches.value_of("SOLVER").unwrap();
     let idx;
     let mut counter = 0;
     let mut errors = BTreeMap::new();
-    let mut split = pc_input.split(".\n").map(|s| s.trim_matches('\n'));
+    let mut split = pc_input
+        .split(".\n")
+        .map(|s| s.trim_matches('\n'))
+        .filter(|s| !s.is_empty());
     // don't judge me
     let iter: Box<dyn Iterator<Item = &str>> = if let Some(idx_str) = matches.value_of("PC_INDEX") {
         idx = idx_str.parse::<usize>().unwrap();
         Box::new(iter::once(split.nth(idx - 1).unwrap_or_else(|| {
-            panic!("Could not find instance at index '{}'", idx)
+            panic!("Could not find instance at given index '{}'", idx)
         })))
     } else {
         idx = 1;
         Box::new(split)
     };
+    let all_solvers_start = Instant::now();
     for (pc, i) in iter.zip(idx..) {
         if pc.is_empty() {
+            println!("[WARNING] Empty instance at index {}", i);
             continue;
         }
         let mut solver = Solver::new(&calculus, pc);
-        let consistent: Option<bool> = comment_parse(&solver.comment);
+        let consistent: Option<bool> = parse_comment(&solver.comment);
         println!(
             "Comment (parsed consistent: {:?}): {}",
             consistent, solver.comment
         );
-        let version = matches.value_of("SOLVER").unwrap();
-        println!("Solver ({}):\n{}", version, solver);
+        println!("Solver (idx: {}, s:{}):\n{}", i, version, solver);
         let time = Instant::now();
         let result = match version {
             "v1" => solver.a_closure_v1(),
             "v2" => solver.a_closure_v2(),
+            "ref1" => solver.refinement_search_v1(),
+            "ref1.5" => solver.refinement_search_v1_5(),
+            "ref1.6" => solver.refinement_search_v1_6(),
+            "ref1.9" => solver.refinement_search_v1_9(),
+            "ref2" => solver.refinement_search_v2(),
             _ => panic!("Unexpected version {}", version),
         };
         println!("Time: {:?}", time.elapsed());
         match result {
             Ok(()) => {
                 println!("Result: Consistent");
-                //println!("Reduced: {:#}", solver);
+                if verbose_count >= 1 {
+                    println!("Reduced: {:#}", solver);
+                }
                 if consistent == Some(false) {
                     let _ = io::stdout().flush();
                     eprintln!("[ERROR] INPUT ASSERTS INCONSISTENCY!");
@@ -154,22 +189,17 @@ fn main() {
         println!("===========================================");
     }
 
-    println!("Finished {} given QCSPs!", counter);
+    println!(
+        "Finished {} given QCSP{} in {:?} total!",
+        counter,
+        if counter > 1 { "s" } else { "" },
+        all_solvers_start.elapsed()
+    );
     if !errors.is_empty() {
         let _ = io::stdout().flush();
         eprintln!("{} ERRORS:", errors.len());
         for (idx, error) in errors.iter() {
             eprintln!("Instance {} has error: {}", idx, error);
         }
-    }
-}
-
-fn comment_parse(comment: &str) -> Option<bool> {
-    if comment.contains("NOT consistent") || comment.contains("inconsistent") {
-        Some(false)
-    } else if comment.contains("consistent") || comment.contains("1-scale-free") {
-        Some(true)
-    } else {
-        None
     }
 }
