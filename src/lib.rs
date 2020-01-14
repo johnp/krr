@@ -1425,7 +1425,7 @@ Refined ({0},{2}):{3} over ({0},{1}):{4} and ({1},{2}):{5} to ({0},{2}):{6}
     }
 
     // v1.6 with a-tractable subset partitioning
-    // TODO: this is slow as hell or doesn't terminate at all somehow...
+    // TODO: this is slow or doesn't terminate for non a-tractable inconsistent examples
     pub fn refinement_search_v1_9q(
         &mut self,
         queue: Option<HashKeyedPriorityQueue<(u32, u32), Reverse<u32>>>,
